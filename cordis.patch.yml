@@ -1,0 +1,7 @@
+# dsh-shared-tree —— bundle 补丁：插入「共享树管理」插件行。
+#
+# 只插自己的行（insert 语义会拒绝重复的 loader entry id）。
+- insert:
+    - id: shared-tree
+      name: 'dsh-shared-tree'
+      config: {}

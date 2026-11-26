@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Shared plugin tree",
+    "description": "Install packages into the cross-profile shared tree, search what it holds, and switch each shared bundle on or off for this profile. The tree lives at <DSH_HOME>/profiles/node_modules, so every profile resolves those packages by name without installing its own copy.",
+    "detail": "docs/DETAIL.md"
+  }
+}

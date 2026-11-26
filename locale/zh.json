@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "共享插件树",
+    "description": "把包安装到跨 profile 的共享树，搜索树里有哪些包，并决定当前 profile 启用树里的哪些 bundle。共享树位于 <DSH_HOME>/profiles/node_modules，所有 profile 按包名引用同一份，不再各自安装。",
+    "detail": "docs/DETAIL.md"
+  }
+}
