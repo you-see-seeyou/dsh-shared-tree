@@ -61,4 +61,4 @@ locale/*.json  ：仅由 client 侧 locale 机制按 NS 'dsh-shared-tree' 使用
 | `test/shared-tree.test.mjs` | `../lib/index.js`，fake ctx（临时目录建假共享树） |
 | `test/client.test.mjs` | `../lib/client.js`，假 `__ModuleLoader__`/react，纯契约层断言 |
 | `test/live-smoke.mjs` | Host 在线冒烟（需真实 DSH 会话） |
-| `test/real-route-dryrun.mjs` / `test/real-linked-dryrun.mjs` | 录制的真实 desktop 快照 dryrun（数据已匿名化为占位路径），无网络、无真实文件系统写 |
+| `test/real-route-dryrun.mjs` / `test/real-linked-dryrun.mjs` | 用中性占位数据的 dryrun 脚本（`example-*` / `D:\ws\...`）：演示 status 计数与 `linked` 只读分区，无网络、无真实文件系统写 |

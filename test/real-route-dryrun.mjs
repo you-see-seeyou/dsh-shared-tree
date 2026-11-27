@@ -1,11 +1,10 @@
 import { apply } from '../lib/index.js'
 const tools = new Map()
 const webServer = { routes: [], register(r) { this.routes.push(r); return () => {} } }
+// 示例 profile 的 bundle 清单（中性占位，不含真实插件组合）。
 const bundles = [
-  { name: 'dsh-mnemon', enabled: true }, { name: 'dsh-taskboard', enabled: true },
-  { name: 'dsh-super-kanban', enabled: true }, { name: 'dsh-context', enabled: true },
-  { name: 'dsh-hermes-memory', enabled: true }, { name: 'dsh-plugin-guard', enabled: true },
-  { name: 'dsh-prompt-rewriter', enabled: true }, { name: 'dsh-better-sidebar', enabled: true },
+  { name: 'example-bundle-a', enabled: true }, { name: 'example-bundle-b', enabled: true },
+  { name: 'example-bundle-c', enabled: true }, { name: 'example-bundle-d', enabled: false },
 ]
 const ctx = {
   tools: { register: (t) => tools.set(t.name, t) },
@@ -19,23 +18,8 @@ const req = { method: 'GET', url: '/dsh-shared-tree/status', on() {}, destroy() 
 const p = route.handler(req, res)
 await new Promise((r) => { res.done = r; setTimeout(r, 50) })
 await p
-const j = JSON.parse(res.body)
-const v = j.value
-console.log('=== 侧边栏数据源（真实共享树 + 假 pluginManager）===')
-console.log('列表行数 counts.total      :', v.counts.total)
-console.log('插件总数 counts.plugins     :', v.counts.plugins)
-console.log('归组组件 counts.components  :', v.counts.components)
-console.log('bundle / 仅 client          :', v.counts.bundle, '/', v.counts.clientOnly)
-console.log('已启用 counts.enabled       :', v.counts.enabled)
-console.log('被过滤的纯依赖库 libraries  :', v.counts.libraries, '  (= 194 - 20)')
-console.log('')
-console.log('顶层行（%d 个）:', v.packages.length)
-for (const pkg of v.packages) {
-  const kids = pkg.components ?? []
-  console.log(`  ${pkg.name}${pkg.enabled ? ' [已启用]' : ''}${kids.length ? ` → ${kids.length} 组件` : ''}`)
-}
-console.log('')
-const owner = v.packages.find((p) => p.name === 'dsh-mnemon')
-console.log('dsh-mnemon 下的组件:', (owner.components ?? []).map((c) => c.name).join(', '))
-const leaked = v.packages.filter((p) => /^(d3|mermaid|codemirror|@lezer|cytoscape)/.test(p.name))
-console.log('顶层行里是否残留 d3/mermaid/codemirror/@lezer/cytoscape:', leaked.length ? leaked.map(p=>p.name).join(',') : '无 ✓')
+const v = JSON.parse(res.body).value
+console.log('=== 计数 ===')
+console.log(JSON.stringify(v.counts))
+console.log('=== 包列表 ===')
+for (const item of v.packages) console.log('  ' + item.name + '  kind=' + item.kind + '  enabled=' + item.enabled)

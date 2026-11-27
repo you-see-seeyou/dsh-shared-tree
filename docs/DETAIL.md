@@ -69,7 +69,7 @@ shared_tree action=disable target=dsh-taskboard
 
 ### 列表只显示"具备插件语义"的包
 
-共享树的 194 个顶层包里只有 20 个是插件，其余 174 个是 pnpm 按 `nodeLinker: hoisted` 提升进来的
+共享树的顶层包里只有少数是插件，其余绝大多数是 pnpm 按 `nodeLinker: hoisted` 提升进来的
 纯依赖库（d3 / mermaid / codemirror / @lezer/* …）。它们没有 `dsh.*` 清单、没有 enable 语义，
 所以在**数据源**（`buildStatusData`）就被过滤掉：不进列表、不计入分组计数，只报一个被过滤的条数。
 
@@ -78,7 +78,7 @@ shared_tree action=disable target=dsh-taskboard
 往假树里新塞 `d3` / `mermaid`，断言它们自动消失、且"被过滤条数"+2。
 
 工具侧的 `shared_tree action=status` 仍报告全貌，并显式给出拆分：
-`顶层包：194 个（插件 20：bundle 16 / 仅 client 4；纯依赖库 174）`。
+`顶层包：N 个（插件 M：bundle X / 仅 client Y；纯依赖库 N-M）`。
 `action=search` 也不过滤（它是诊断工具，带显式的 `kind` 过滤）。
 
 ### mnemon 组件收进归属包
@@ -96,18 +96,17 @@ shared_tree action=disable target=dsh-taskboard
 - 关键字搜索命中子项时，归属行会显示出来（否则搜 "scoped" 会找不到）。
 - 组件不参与类别/状态过滤（它们没有独立的 enabled 状态）。
 
-实测真实共享树：**194 → 过滤 174 个依赖库 → 20 个插件 → 4 个组件归组 → 列表 16 行**。
+示例：**180 → 过滤 160 个依赖库 → 20 个插件 → 4 个组件归组 → 列表 16 行**（实际数字随树的当前内容变化）。
 
 ### 只读分区：本 profile 的 `link:` 插件
 
 面板底部还有一个**只读**分区，列出本 profile 里以 `link:` 本地路径安装的插件
-（桌面实测 7 条：`dsh-agent-model-hub` / `dsh-llm-empty-text-guard` / `dsh-llm-failover-probe` /
-`dsh-qwen-token-plan-cn-responses` / `dsh-rotation-signal` / `dsh-shared-tree` / `dsh-steer-busy`）。
+（示例：`example-linked-a` / `example-linked-b` / `dsh-shared-tree` 这类以本地路径挂载的包）。
 
 - 数据来自 Host 的 `linked` 字段，源头是 `pluginManager.listBundles()` 里 `source` 以 `link:` 开头的条目；
   与共享树列表重名的条目会被剔除。
 - **不并入 `packages`**，也**不进 `total / plugins / components / libraries` 任何计数** ——
-  只多一个 `counts.linked` 供分区标题使用。实测加入该分区后四个计数完全不变（16 / 20 / 4 / 174）。
+  只多一个 `counts.linked` 供分区标题使用。实测加入该分区后四个计数完全不变。
 - 分区内**不渲染任何按钮**：这些包物理上不在共享树里（profile 本地 symlink 会遮蔽树内副本），
   启停要用 Plugins 页。因此结构上不存在"把自己关掉"的路径。
 - 每条显示 `linked` 徽标、启用状态、以及 `link:` 原目标路径。
@@ -281,9 +280,9 @@ shared_tree action=verify    # 逐包复核 sha256，报告版本漂移/内容�
    真实观感（深浅色、约 300px 窄栏下的密度与换行）需要在 App 里肉眼看。
 8. **4 个 `dsh-mnemon-source-*` 仍是独立行**。它们只有 `dsh.client`、不带 `dsh.bundle`，
    所以既撞不上 entry id、也无法独立启用（点击只给提示，不跳转）。当前列表因此是
-   **16 行 = 20 个插件 − 4 个归组组件**。如果希望把它们也收进 dsh-mnemon（列表变 12 行），
+   **列出行数 = 插件数 − 归组组件数**。如果希望把它们也收进 dsh-mnemon，
    改 `standaloneConflictOf` 的触发条件让它也覆盖 client-only 的 mnemon 组件即可。
-9. **工具侧不过滤**。`shared_tree action=search` 仍能看到全部 194 个包（它带显式 `kind` 过滤，
+9. **工具侧不过滤**。`shared_tree action=search` 仍能看到全部包（它带显式 `kind` 过滤，
    是诊断工具）；只有侧边栏列表按插件语义过滤。`action=status` 会显式给出插件/依赖库拆分。
 
 ## 配置

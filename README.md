@@ -20,8 +20,8 @@
 **列表只显示具备插件语义的包**：判据是包自带 `dsh.*` 清单（不是包名白名单），
 所以 pnpm 按 hoisted 提升进来的纯依赖库（d3 / mermaid / codemirror …）会自动被过滤，
 不进列表、不计入计数，只在顶部报一句"已隐藏 N 个纯依赖库"。
-实测本机：194 个顶层包 → 过滤 174 个依赖库 → 20 个插件 → 4 个 mnemon strategy 组件
-收进 `dsh-mnemon` 之下 → **列表 16 行**。
+示例（某台开发机）：180 个顶层包 → 过滤 160 个依赖库 → 20 个插件 → 4 个 mnemon strategy 组件
+收进 `dsh-mnemon` 之下 → **列表 16 行**（数字随树的实际内容变化，此处仅示意）。
 
 组件子行没有独立开关（它们的 entry id 已由归属包提供，单独启用会重复插入 id 触发 issue #470），
 开关由归属包状态 + profile patch 行控制。
@@ -113,7 +113,7 @@
 - **宿主清单在启动时读取：新登记的包需重启 DSH（或该 profile）后才能在官方面板看到。**
 
 面板底部还有一个**只读分区**，列出本 profile 以 `link:` 本地路径安装的插件
-（桌面实测 7 条，含 `dsh-shared-tree` 自己），标 `linked` 徽标与原始路径。
+（示例中为 3 条，通常含 `dsh-shared-tree` 自己），标 `linked` 徽标与原始路径。
 分区内没有按钮，也**不计入** `total / plugins / components / libraries` 任何计数
 （只多一个 `counts.linked`）；这些包物理上不在共享树里，启停请用 Plugins 页。
 

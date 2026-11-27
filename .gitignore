@@ -1,6 +1,18 @@
 node_modules/
 *.log
 _push/
-
 _ref-pm/
 tmp-*.log
+
+# 开发期覆盖前快照（本地产物，不入库）
+.bak-*/
+*.bak-*
+
+# 共享树的本地记账/缓存产物：含本机绝对路径与扫描结果，不入库
+.dsh-shared-tree.json
+.dsh-shared-tree-history.json
+.dsh-shared-tree-lifecycle.json
+.dsh-shared-tree-panel.json
+.dsh-shared-tree-updates.json
+.dsh-shared-tree-restore-report.json
+.dsh-shared-tree-baseline-report.json
