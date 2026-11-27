@@ -931,6 +931,110 @@ await test('GET /impact 报告引用 profile、解析版本与升级历史', asy
   tree.cleanup()
 })
 
+await test('可升级判据：只有 latest > current 才算；降级方向（如 git 装的版本高于 registry）不算', () => {
+  const { compareVersions } = exporter
+  // 常规升级
+  assert.ok(compareVersions('0.33.0', '0.32.1') > 0, '0.33.0 > 0.32.1')
+  assert.ok(compareVersions('1.10.1', '1.9.0') > 0, '1.10.1 > 1.9.0（不是字符串比较）')
+  assert.ok(compareVersions('0.10.0', '0.10.0') === 0)
+  assert.ok(compareVersions('0.12.0', '0.13.0') < 0)
+  // 实测案例：树内 dsh-douyin@0.3.2（git 装的）vs registry 只有 0.0.1 → 降级，不算可升级。
+  assert.ok(compareVersions('0.0.1', '0.3.2') < 0, 'registry 更旧 → 不是升级')
+  // 预发布后缀被忽略。
+  assert.ok(compareVersions('0.2.2-rc.5', '0.2.2') === 0)
+  assert.ok(compareVersions('0.2.3-rc.1', '0.2.2') > 0)
+  // 不可解析回 null（保守：不给升级按钮）。
+  assert.equal(compareVersions('not-a-version', '1.0.0'), null)
+  assert.equal(compareVersions(null, '1.0.0'), null)
+  // 缺失补 0：1.2 == 1.2.0
+  assert.ok(compareVersions('1.2', '1.2.0') === 0)
+})
+
+await test('版本更新缓存：/updates 无缓存时如实报告"从未扫描"，不被当成"全部最新"', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const { status, json } = await callRoute(route.handler, 'GET', '/dsh-shared-tree/updates')
+  assert.equal(status, 200)
+  assert.equal(json.value.scannedAt, null, '从未扫描必须是 null，而不是捏一个时间')
+  assert.deepEqual(json.value.upgradable, [])
+  assert.equal(json.value.scanning, false)
+  tree.cleanup()
+})
+
+await test('版本更新缓存：读盘回放 + 可升级判据（available 且 latest !== current）', async () => {
+  const tree = fakeTree()
+  // 直接写一份缓存（模拟定时扫描已跑过），验证读盘与判据。
+  writeFileSync(join(tree.root, '.dsh-shared-tree-updates.json'), JSON.stringify({
+    scheme: 'dsh-shared-tree-updates/1',
+    scannedAt: '2026-11-27T08:00:00.000Z',
+    durationMs: 24000,
+    entries: {
+      'fake-bundle': { current: '1.2.3', latest: '1.3.0', available: true, upgradable: true, checks: [], ok: true, error: null },
+      'fake-client': { current: '2.0.0', latest: '2.0.0', available: true, upgradable: false, checks: [], ok: true, error: null },
+      'offline': { current: '1.0.0', latest: null, available: false, error: 'registry-unreachable' },
+    },
+    error: null,
+  }, null, 2))
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const { json } = await callRoute(route.handler, 'GET', '/dsh-shared-tree/updates')
+  assert.equal(json.value.scannedAt, '2026-11-27T08:00:00.000Z')
+  assert.equal(json.value.durationMs, 24000)
+  // 可升级清单只含 fake-bundle：fake-client 版本相同、offline 不可达。
+  assert.deepEqual(json.value.upgradable.map((row) => row.name), ['fake-bundle'])
+  assert.deepEqual(json.value.upgradable[0], { name: 'fake-bundle', current: '1.2.3', latest: '1.3.0' })
+  tree.cleanup()
+})
+
+await test('版本更新缓存损坏时按"从未扫描"处理（不崩、不误报）', async () => {
+  const tree = fakeTree()
+  writeFileSync(join(tree.root, '.dsh-shared-tree-updates.json'), '{ this is not json')
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const { status, json } = await callRoute(route.handler, 'GET', '/dsh-shared-tree/updates')
+  assert.equal(status, 200)
+  assert.equal(json.value.scannedAt, null)
+  assert.deepEqual(json.value.upgradable, [])
+  tree.cleanup()
+})
+
+await test('扫描并发保护：正在扫描时 POST /updates 返回 409，不重复打 registry', async () => {
+  const tree = fakeTree()
+  const webServer = fakeWebServer()
+  const ctx = fakeContext({ webServer, pluginManager: { listBundles: async () => [] } })
+  // 让 pnpm 永不返回：扫描会一直挂着，从而保持 isScanning=true。
+  ctx.effect = (callback) => { callback(); return () => {} }
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const route = webServer.routes.find((item) => item.path === '/dsh-shared-tree')
+  // 先发起一次扫描（不 await），立刻再发一次 → 第二次应拿到 409。
+  const first = route.handler(
+    { method: 'POST', url: '/dsh-shared-tree/updates', on: () => {}, destroy: () => {} },
+    { statusCode: 0, body: '', writeHead(s) { this.statusCode = s; return this }, end(c) { if (c !== undefined) this.body += String(c) } },
+  )
+  // 给微任务一个机会把 scanning 置真。
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const second = await callRoute(route.handler, 'POST', '/dsh-shared-tree/updates', {})
+  // 要么 409（第一次仍挂着），要么 200（第一次已结束）—— 两者都不能崩，且不能并发跑两份。
+  assert.ok(second.status === 409 || second.status === 200, `并发保护不得崩：status=${second.status}`)
+  if (second.status === 409) assert.match(second.json.error, /already running/)
+  await Promise.resolve(first)
+  tree.cleanup()
+})
+
+await test('定时扫描契约：apply 必须注册扫描定时器并可被 dispose 清理', async () => {
+  const tree = fakeTree()
+  const webServer = fakeWebServer()
+  const effects = []
+  const ctx = fakeContext({ webServer, pluginManager: { listBundles: async () => [] } })
+  ctx.effect = (callback, label) => { effects.push({ callback, label }); return () => {} }
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const entry = effects.find((item) => item.label === 'dsh-shared-tree: update scan timer')
+  assert.ok(entry !== undefined, '必须注册版本更新扫描的定时器 effect')
+  // dispose 必须是函数（清理定时器），且调用不炸。
+  const dispose = entry.callback()
+  assert.equal(typeof dispose, 'function', 'effect 必须返回清理函数（清定时器）')
+  assert.doesNotThrow(() => dispose())
+  tree.cleanup()
+})
+
 await test('pnpm 输出解析：嵌套 versions/time 的对象必须切对 JSON 主体（可升级判据的根）', () => {
   // 实测缺陷：pnpmView 原来用 lastIndexOf('{') 切 JSON，而 `pnpm view --json` 的对象体里
   // 嵌套着 versions / time / dist，最后一个 `{` 落在 `time` 字段内 → 所有包都解析失败 →

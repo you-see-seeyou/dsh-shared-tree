@@ -266,16 +266,17 @@ await test('slots 注册抛错时不连累其他入口', () => {
   assert.ok(names.includes('sidebar.panellist'), '第一处失败后第二处仍应注册')
 })
 
-await test('写请求白名单：/panel（登记面板可见）+ 升级通道 /install、/check-profiles', () => {
+await test('写请求白名单：/panel（登记面板可见）+ 升级通道 /install、/check-profiles、/updates', () => {
   const calls = [...SOURCE.matchAll(/postJson\(\s*('([^']+)'|`([^`]+)`)/g)].map((m) => m[2] ?? m[3])
   assert.ok(calls.length > 0, '客户端必须显式声明写请求路径')
-  const allowed = new Set(['/panel', '/install', '/check-profiles'])
+  const allowed = new Set(['/panel', '/install', '/check-profiles', '/updates'])
   for (const path of calls) {
     assert.ok(allowed.has(path), `不允许的写请求：${path}`)
   }
   // 升级通道必须真的被使用（2026-11-27 恢复的长期保留功能）。
   assert.ok(calls.includes('/install'), '升级必须走 POST /install')
   assert.ok(calls.includes('/check-profiles'), '升级完成后必须调 /check-profiles 出验证结果卡')
+  assert.ok(calls.includes('/updates'), '「立即检查」必须走 POST /updates 触发一次服务端扫描')
   // 已删除的功能按钮对应的路由一个都不得再出现（升级相关的 /install、/check-profiles、/impact、/deps 除外）。
   for (const gone of ['/set', '/rollback', '/set-profile', '/set-entry', '/set-row', '/lifecycle-baseline-restore', '/entries', '/debug', '/detail', '/rows']) {
     assert.ok(!SOURCE.includes(gone), `已删除的路由不得再出现：${gone}`)
@@ -304,7 +305,7 @@ await test('精简契约：自建详情页与无关功能按钮不得复活（�
   const buttons = [...SOURCE.matchAll(/h\('button'/g)]
   assert.equal(buttons.length, 6, `面板应有 6 个按钮（刷新/检查更新/行内升级/取消/开始/进度卡关闭），实际 ${buttons.length} 个`)
   assert.ok(SOURCE.includes("t('refresh')"), '必须有刷新按钮')
-  assert.ok(SOURCE.includes("t('checkUpdates')"), '必须有检查更新按钮')
+  assert.ok(SOURCE.includes("t('checkNow')"), '必须有立即检查按钮')
   assert.ok(SOURCE.includes("t('upgrade')"), '必须有行内升级按钮')
 })
 
@@ -313,7 +314,9 @@ await test('升级能力契约：可升级判据、确认弹窗、进度轮询�
   assert.ok(SOURCE.includes('/deps?pkg='), '可升级判据必须走 /deps（registry 最新版本 + 依赖检查）')
   assert.ok(SOURCE.includes('&ver=latest'), '必须问 latest 版本')
   assert.ok(/deps\.available !== true/.test(SOURCE), 'registry 不可达时不得显示升级按钮')
-  assert.ok(/deps\.version === item\.version/.test(SOURCE), '版本相同判为已是最新')
+  // 判据改为严格版本比较：只有 latest > current 才算可升级（相等是已最新，更小是降级方向）。
+  assert.ok(SOURCE.includes('compareVersionStrings'), '必须用版本比较而非字符串不等')
+  assert.ok(/return order > 0 \? deps : null/.test(SOURCE), '只有严格更新才返回升级信息')
   // 确认弹窗：精确版本锁定 + 影响面 + 依赖检查不通过置灰。
   assert.ok(SOURCE.includes('ConfirmModal'), '必须有确认弹窗组件')
   assert.ok(SOURCE.includes('affectedProfiles'), '弹窗必须展示"影响 N 个 profile"')
@@ -329,13 +332,19 @@ await test('升级能力契约：可升级判据、确认弹窗、进度轮询�
   assert.ok(/setUpdates\(\{\}\)/.test(SOURCE), '升级完成后必须清掉旧的可升级缓存')
   // 行内升级按钮必须 stopPropagation，避免误触发行点击跳转。
   assert.ok(/event\.stopPropagation\(\); void openConfirm/.test(SOURCE), '升级按钮必须 stopPropagation')
-  // 检查更新必须并发 + 增量上屏（单次 /deps 实测 3-7s，串行 20 个包要 90s+，用户会以为按钮坏了）。
-  const checkBody = SOURCE.slice(SOURCE.indexOf('const checkUpdates = useCallback'), SOURCE.indexOf('}, [data])', SOURCE.indexOf('const checkUpdates = useCallback')))
-  assert.ok(/Promise\.all/.test(checkBody), '检查更新必须并发（不能逐个串行 await）')
-  assert.ok(/CONCURRENCY/.test(checkBody), '必须有并发上限（registry 不宜打爆）')
-  assert.ok(/setCheckProgress/.test(checkBody), '必须回报进度，避免长时间只有一个"检查中"')
-  assert.ok(/setUpdates\(\{ \.\.\.next \}\)/.test(checkBody), '必须增量上屏（探到一个显示一个）')
-  assert.ok(SOURCE.includes('checkingProgress'), '按钮/提示要有 {done}/{total} 进度文案')
+  // 定时扫描架构：刷新只读缓存（不打 registry），只有「立即检查」才触发一次真扫。
+  assert.ok(SOURCE.includes("getJson('/updates')"), '刷新必须只读定时扫描缓存 /updates')
+  assert.ok(/postJson\('\/updates'/.test(SOURCE), '「立即检查」必须 POST /updates')
+  // 刷新路径不得再逐包打 /deps。唯一允许的 /deps 调用在升级确认弹窗里（缓存缺该包时兜底取依赖检查），
+  // 不是刷新路径 —— 所以这里断言"没有任何逐包扫描循环"，而不是"完全没有 /deps 字样"。
+  assert.ok(!/for \(const item of targets\)[\s\S]{0,400}\/deps/.test(SOURCE), '不得再有逐包 /deps 扫描循环')
+  assert.ok(!/checkProgress/.test(SOURCE), '逐包扫描进度状态必须删除')
+  assert.ok(SOURCE.includes('scanMeta'), '要展示扫描元信息（上次扫描时间 / 下次时间）')
+  assert.ok(SOURCE.includes('scannedAt'), '要显示"扫描于 时间"')
+  assert.ok(SOURCE.includes('neverScanned'), '从未扫描时要有引导文案')
+  assert.ok(SOURCE.includes('loadUpdates'), '必须有只读缓存的 loadUpdates')
+  // 升级完成后要重新读缓存（版本已变，旧的"可升级"结论作废）。
+  assert.ok(/setUpdates\(\{\}\)/.test(SOURCE), '升级完成后必须清掉旧的可升级缓存')
 })
 
 await test('升级成功后进度卡自动收起（失败不自动收起，结论落到通知区）', () => {

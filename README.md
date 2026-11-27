@@ -40,20 +40,30 @@
 
 ### 升级能力（2026-11-27 恢复，长期保留）
 
-- **检查更新**：顶部「检查更新」按钮（挂载后自动检查一次），对每个插件包问
-  `GET /deps?pkg=<名>&ver=latest`；顶部汇总「N 个插件有新版本」。
-  **并发探测（4 路）+ 增量上屏**，按钮显示「正在检查 done/total…」——
-  单次 `/deps` 实测 3–7 秒（内部两次 `pnpm view`），串行探测 20 个包要 90 秒以上。
-- **可升级判据**（与删除前同源）：`deps.available === true` 且 `deps.version !== 树内版本`。
-  registry 不可达的包不显示升级按钮。
-- **行内「升级」按钮**：只在检查出有新版本时出现，版本号旁显示 `→ v新版本`；
-  点击弹**确认弹窗**（精确版本锁定 + 影响面列表 + 依赖检查，`ok===false` 时开始按钮置灰）。
-- **执行通道**：`POST /install`（`replace: true` 覆盖升级）→ 四阶段进度卡
-  （prepare/build/merge/verify，800ms 轮询 `/install/progress`）→ 完成后
-  `POST /check-profiles` 逐 profile 验证 + 列表刷新到最新版本。
-  **成功后进度卡 6 秒自动收起**（结论同时落到通知区，收起后不丢信息；卡上有「几秒后自动收起」提示）；
-  **失败不自动收起** —— 错误必须留在界面上让用户读，只能手动「取消」关闭。
-- 升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做。
+**版本检测是定时的，刷新不再扫描**（2026-11-27 改）：这是本插件唯一会打 registry 的动作，
+每包两次 `pnpm view`、实测 3–7 秒/包，一次全量约 35–40 秒，所以**绝不放在刷新路径上**。
+
+- **后台定时扫描**：Host 侧 `ctx.effect` 注册定时器，启动 5 秒后先扫一次，之后每
+  **6 小时**一次（`scanIntervalMs` 可配，下限 60 秒）。结果落盘到
+  `.dsh-shared-tree-updates.json`（`scannedAt` / `durationMs` / 每包 `current`/`latest`/`checks`）。
+  扫描并发 3，同一时刻只允许一个。
+- **界面读缓存**：打开/刷新面板只 `GET /updates`（实测 **1–2ms**），完全不碰 registry。
+  顶部显示「N 个插件有新版本 · 扫描于 MM-DD HH:mm」；从未扫描过则提示「每 6h 自动扫一次」。
+- **「立即检查」按钮**：`POST /updates` 触发一次真扫（约 35–40 秒），用于想马上确认。
+- **可升级判据**：`latest` **严格大于** `current` 才算。相等＝已最新；更小＝当前装的是另一条
+  来源（如 `dsh-douyin@0.3.2` 从 git commit 装，而 registry 只有 `0.0.1`），那是**降级方向，
+  不给升级按钮**。版本不可解析时也不提供（保守）。
+- **行内「升级」按钮**：只在可升级时出现，版本号旁显示 `→ v新版`；点击弹**确认弹窗**
+  （精确版本锁定 + 影响面 + 依赖检查，`ok===false` 置灰）。
+- **执行通道**：`POST /install`（`replace: true`）→ 四阶段进度卡（800ms 轮询
+  `/install/progress`）→ 完成后 `POST /check-profiles` 逐 profile 验证 + 刷新列表 + 重读缓存。
+  **成功后进度卡 6 秒自动收起**（结论落到通知区，卡上有「几秒后自动收起」提示）；
+  **失败不自动收起** —— 错误必须留在界面上，只能手动「取消」关闭。
+
+| 路由 | 作用 |
+|---|---|
+| `GET /dsh-shared-tree/updates` | 读定时扫描缓存（含 `scannedAt` / `upgradable` / `scanning` / `nextScanAt` / `intervalMs`） |
+| `POST /dsh-shared-tree/updates` | 立即扫描一次（同一时刻只允许一个，重复请求 409） |
 
 **依赖检查的两条判据修正**（否则升级按钮会被大面积错误置灰）：
 1. `satisfiesRange` 支持 `||` 并联（如 `engines.node: "^22.19 || >=24"`）；旧实现把整串当不满足，
@@ -107,11 +117,11 @@
 分区内没有按钮，也**不计入** `total / plugins / components / libraries` 任何计数
 （只多一个 `counts.linked`）；这些包物理上不在共享树里，启停请用 Plugins 页。
 
-界面数据来自 Host 的只读路由 `/dsh-shared-tree/status`、`/dsh-shared-tree/lifecycle`、
-`/dsh-shared-tree/deps`、`/dsh-shared-tree/impact`、`/dsh-shared-tree/install/progress`，
-写请求只有三个：`POST /panel`（跳转前登记面板可见性）、`POST /install`（升级）、
-`POST /check-profiles`（升级后逐 profile 验证）。
-搜索与过滤全在浏览器内完成，不发写请求。启用/停用等写操作归官方 Plugins 页与 `shared_tree` 工具。
+界面数据来自 Host 的只读路由 `/dsh-shared-tree/status`、`/lifecycle`、`/updates`、
+`/impact`、`/install/progress`，写请求只有四个：`POST /panel`（登记面板可见性）、
+`POST /updates`（立即扫描一次版本）、`POST /install`（升级）、`POST /check-profiles`（升级后验证）。
+搜索与过滤、以及版本检测结果的日常读取全在浏览器内完成，不发网络请求打 registry。
+启用/停用等写操作归官方 Plugins 页与 `shared_tree` 工具。
 
 三处注册各自 try/catch：任何一处失败（例如宿主没有 `sidebarRightTabs`）只少一个入口，
 不影响其他入口，也不影响工具本身。
@@ -140,9 +150,11 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 - **组合包整族进** —— `dsh-mnemon` 需要 18 个子包 + `zod`/`yaml`/`fflate`，install 算的是依赖闭包。
 - **零 `@deepseek-ai` 依赖** —— Host 与客户端两侧都只用 Node 内置模块 / `react`。
   客户端尤其不 require `@deepseek-ai/dsh-client-*`：那些包会在版本间变化，且抛错的组件会让槽位直接空白。
-- **界面写操作受限** —— 客户端写请求只有 `/panel`（登记面板可见性，不加载插件）、
+- **界面写操作受限** —— 客户端写请求只有 `/panel`（面板登记）、`/updates`（立即扫一次版本）、
   `/install`（升级，覆盖式）、`/check-profiles`（升级后验证）；
   启用/停用、装包不在界面里做，归官方 Plugins 页与工具。
+- **版本检测不打在刷新路径上** —— 扫描由 Host 定时器后台跑（默认 6h），结果落盘
+  `.dsh-shared-tree-updates.json`；界面刷新只读缓存（1–2ms）。
 
 完整说明与已知限制见 [docs/DETAIL.md](docs/DETAIL.md)。
 
@@ -152,10 +164,11 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 npm test
 ```
 
-- `test/shared-tree.test.mjs` —— Host 侧 82 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
+- `test/shared-tree.test.mjs` —— Host 侧 88 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
   `safetyNote` + 只读保证 + 面板可见性登记/撤销/组件拒登记/生命周期联动 +
   **默认登记：启用后自动登记、幂等、不覆盖用户依赖、启动补扫存量、跳过组件、撤销尊重** +
-  **pnpm 输出解析（嵌套 versions/time 的 JSON 切片）+ 依赖检查（`||` 并联、宿主自带 peer 不误判）**）。
+  **pnpm 输出解析 + 依赖检查（`\|\|` 并联、宿主自带 peer 不误判）** +
+  **版本更新缓存：定时扫描落盘、只读回放、损坏降级、并发 409、可升级判据（严格大于、降级不算）**）。
 - `test/client.test.mjs` —— 客户端契约 30 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
   竞态保护、类别过滤与工具同源、未知状态、可访问性、无硬编码配色、
   **精简契约：自建详情页与无关按钮不得复活（升级能力除外）、写请求白名单 /panel+/install+/check-profiles**、

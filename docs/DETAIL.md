@@ -120,7 +120,9 @@ shared_tree action=disable target=dsh-taskboard
 |---|---|
 | `GET /dsh-shared-tree/status` | 插件列表（含 `hasBundle` / `hasClient` / `kind` / `version` / `enabled` / `components`）+ `linked` 只读分区 + 计数 + junction 健康 + 清单摘要 |
 | `GET /dsh-shared-tree/lifecycle` | 生命周期状态（只读展示：是否初始化、基线 profile 数、台账变更数） |
-| `GET /dsh-shared-tree/deps` | registry 最新版本 + 依赖检查（可升级判据与确认弹窗的数据源） |
+| `GET /dsh-shared-tree/deps` | registry 最新版本 + 依赖检查（升级确认弹窗的依赖检查数据源；单包按需查） |
+| `GET /dsh-shared-tree/updates` | **定时扫描缓存**（`scannedAt` / `durationMs` / `entries` / `upgradable` / `scanning` / `nextScanAt` / `intervalMs`）；界面刷新只读它 |
+| `POST /dsh-shared-tree/updates` | 立即扫描一次全部插件版本（并发 3；同一时刻只允许一个，重复 409） |
 | `GET /dsh-shared-tree/impact` | 升级影响面（哪些 profile 引用该包） |
 | `GET /dsh-shared-tree/install/progress` | 升级任务进度（四阶段） |
 | `POST /dsh-shared-tree/panel` | `{ target, exposed, profile? }` → 登记/撤销 `link:` 依赖，让包重新出现在官方 Plugins 面板（不加载） |
@@ -134,8 +136,10 @@ shared_tree action=disable target=dsh-taskboard
   共用 `autoPanelSync` / `autoPinOne`，底层仍是同一个 `setPanelVisibility`。
 
 界面内的搜索与过滤是**纯浏览器侧**数组过滤，不发任何写请求。
-客户端写请求只有三个：`/panel`（点独立 bundle 行跳转前登记面板可见性）、
-`/install`（行内「升级」按钮触发的覆盖式升级）、`/check-profiles`（升级后逐 profile 验证）；
+客户端写请求只有四个：`/panel`（点独立 bundle 行跳转前登记面板可见性）、
+`/updates`（立即扫描一次版本）、`/install`（行内「升级」按钮触发的覆盖式升级）、
+`/check-profiles`（升级后逐 profile 验证）；
+**日常刷新不触发任何 registry 请求**（只 `GET /updates` 读定时扫描缓存）；
 **启用/停用、装包、功能行开关都不在界面里做**（归官方 Plugins 页与 `shared_tree` 工具 / 其余 HTTP 路由）。
 
 ### 点行行为与已删除的界面能力（2026-11-27 精简）
@@ -158,12 +162,31 @@ shared_tree action=disable target=dsh-taskboard
 
 | 环节 | 实现 | 与删除前的关系 |
 |---|---|---|
-| 可升级判据 | `GET /deps?pkg=<名>&ver=latest`：`available===true` 且 `version !== 树内版本` | 同源（原 DetailPanel 的 upToDate 判据） |
-| 检查入口 | 顶部「检查更新」按钮 + 挂载后自动检查一次；4 路并发 + 增量上屏 + `done/total` 进度；汇总「N 个插件有新版本」 | 新增（原为逐包进详情页查看） |
-| 升级入口 | 行内「升级」按钮（仅检查出有新版本时出现）+ 版本旁 `→ v新版本` | 同源（原行内按钮） |
+| 可升级判据 | 定时扫描缓存：`latest` **严格大于** `current` 才算（相等＝已最新；更小＝降级方向不算） | 强化（原为"不相等"） |
+| 检查入口 | **Host 定时器**后台扫描（启动 5s 后首次，之后每 6h，`scanIntervalMs` 可配）；结果落盘 `.dsh-shared-tree-updates.json`；界面刷新只 `GET /updates` 读缓存（1–2ms）；顶部「立即检查」按钮 `POST /updates` 可手动扫一次 | 重构（原为每次刷新逐包打 registry，35–40s） |
+| 升级入口 | 行内「升级」按钮（仅可升级时出现）+ 版本旁 `→ v新版` | 同源（原行内按钮） |
 | 确认弹窗 | `ConfirmModal`：精确版本锁定 + 影响面（`/impact`）+ 依赖检查（`ok===false` 置灰） | 同源，依赖检查从原 depsSection 移入 |
 | 执行通道 | `POST /install`（`replace:true`）→ `JobCard` 四阶段进度（800ms 轮询 `/install/progress`） | 同源 |
-| 完成反馈 | `POST /check-profiles` 逐 profile 验证 + `load()` 刷新列表 + 清空可升级缓存；**成功后 6 秒自动收起进度卡**（结论落到通知区；失败不自动收起） | 同源 + 自动收起（新增） |
+| 完成反馈 | `POST /check-profiles` 逐 profile 验证 + `load()` 刷新列表 + 重读缓存；**成功后 6 秒自动收起进度卡**（结论落到通知区；失败不自动收起） | 同源 + 自动收起（新增） |
+
+#### 定时版本检测（2026-11-27）
+
+每包两次 `pnpm view`，实测 3–7 秒/包，一次全量 35–40 秒。所以检测**不在刷新路径上**：
+
+- Host `ctx.effect` 注册定时器：`scanOnStart`（默认 true，启动后 5s）先扫一次，之后间隔
+  `scanIntervalMs`（默认 6h，下限 60s）；`unref()` 不拖住进程退出；dispose 时清定时器。
+- 扫描并发 3，同一时刻只允许一个（`POST /updates` 重复请求返回 409）。
+- 结果落盘 `.dsh-shared-tree-updates.json`：`scheme` / `scannedAt` / `durationMs` /
+  `entries[包名] = { current, latest, available, upgradable, downgrade, checks, ok, error }`。
+- 界面打开/刷新只 `GET /updates`；`scannedAt === null` 如实显示"尚未扫描"，不冒充"全部最新"。
+  扫描进行中时轮询缓存（5s）直到出结果。
+
+#### 降级方向不算可升级（实测案例）
+
+`dsh-douyin` 树内是 `0.3.2`（从 git commit 装），而 npm registry 只有 `0.0.1`。
+旧判据用"不相等"，会把它当成"可升级 0.3.2 → 0.0.1"——那是**降级**。
+现在 `compareVersions()`（服务端与客户端各一份同源实现）只认 `latest > current`；
+版本不可解析时也不提供按钮。实测修复后列表从 5 个降到正确的 4 个。
 
 升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做；
 行点击仍 `ensurePanelVisible()` → `openBundle()`，组件/client-only 仍只给 notice。
@@ -248,9 +271,10 @@ shared_tree action=verify    # 逐包复核 sha256，报告版本漂移/内容�
 2. **没有 lockfile 守护**。这份目录没有 `package.json`/`pnpm-lock.yaml`，pnpm 不会替你校验完整性。改动只能靠 `.dsh-shared-tree.json` 的 sha256 复核。
 3. **升级即全局生效**。树里的包被所有 profile 共用，升级会同时影响全部引用者，改前先备份并逐 profile 实跑。
 4. **`@deepseek-ai/*` 只读**。本插件拒绝向该 scope 写入。
-5. **界面写操作受限**。客户端写请求只有 `/panel`（面板登记）、`/install`（升级）、
-   `/check-profiles`（升级后验证）；`enable` / `disable` / `verify` / 回滚只走
+5. **界面写操作受限**。客户端写请求只有 `/panel`（面板登记）、`/updates`（立即扫一次版本）、
+   `/install`（升级）、`/check-profiles`（升级后验证）；`enable` / `disable` / `verify` / 回滚只走
    `shared_tree` 工具、CLI 或官方 Plugins 页。
+   **版本检测由 Host 定时器后台跑（默认 6h），结果落盘；刷新只读缓存，不打 registry。**
 6. **启用态以 Host 为准，界面不缓存**。界面每次刷新都重拉 `/status`；`restart-required` 的包
    在 `listBundles()` 里仍是旧状态，需要重启后才会在界面与官方面板里更新。
 7. **界面渲染未做浏览器实测**。契约层（槽位注册、inject 行为、locale、只读、配色）已用测试钉住，
