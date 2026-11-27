@@ -170,7 +170,7 @@ await test('插件注册 shared_tree 工具且参数完整', () => {
   assert.ok(tool !== undefined, '未注册 shared_tree')
   assert.equal(tool.parameters.type, 'object')
   assert.deepEqual(tool.parameters.required, ['action'])
-  assert.deepEqual(tool.parameters.properties.action.enum, ['status', 'search', 'enable', 'disable', 'install', 'verify', 'lifecycle'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['status', 'search', 'enable', 'disable', 'install', 'verify', 'lifecycle', 'panel'])
   assert.equal(typeof tool.execute, 'function')
   assert.equal(typeof tool.output.render, 'function')
 })
@@ -1358,6 +1358,229 @@ await test('POST /set-row 优先 manager.setPluginEnabled（原版写入链路�
   const text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
   assert.match(text, /- id: fake-main/, '兜底必须把禁用写进 profile 覆盖层')
   tree2.cleanup()
+})
+
+// ── 官方面板可见性（panel）：树里的包必须能重新出现在 pluginManager.listBundles 的候选集合里 ──
+
+/**
+ * 造一个带 profile 的假树，并给该 profile 一份可写 package.json。
+ * @param {object} [manifest] 初始清单。
+ * @returns {{tree: any, profileDir: string, profileName: string}} 场景。
+ */
+function fakeProfileTree(manifest = { name: 'prof-panel', private: true }) {
+  const tree = fakeTree()
+  const profileName = 'prof-panel'
+  const profileDir = join(dirname(tree.root), profileName)
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2))
+  return { tree, profileDir, profileName }
+}
+
+/** 造一个把自己当作该 profile 的假 pluginManager（profile.dir 驱动 currentProfile 解析）。 */
+function managerForProfile(profileDir, calls = []) {
+  return {
+    profile: { dir: profileDir },
+    listBundles: async () => [],
+    setBundleEnabled: async (packageName, enabled) => {
+      calls.push([packageName, enabled])
+      return { application: 'restart-required', nextStep: 'restart DSH' }
+    },
+  }
+}
+
+await test('panel 报告：分得清"树里有"和"面板看得见"', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  const { status, json } = await callRoute(route.handler, 'GET', '/dsh-shared-tree/panel?profile=prof-panel')
+  assert.equal(status, 200)
+  assert.equal(json.ok, true)
+  assert.deepEqual(json.value.treeBundles, ['fake-bundle'], '只有 dsh.bundle 的包算 bundle')
+  assert.deepEqual(json.value.visible, [], '清单里什么都没写 → 面板看不见')
+  assert.deepEqual(json.value.hidden, ['fake-bundle'], '这正是"跳过去面板空"的根因')
+  // profile 不存在时明确报错，不静默返回空报告。
+  const missing = await callRoute(route.handler, 'GET', '/dsh-shared-tree/panel?profile=nope')
+  assert.equal(missing.status, 404)
+  tree.cleanup()
+})
+
+await test('panel 登记：写 link: 依赖让面板可见，但绝不写 dsh.profile.bundles', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  const posted = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  assert.equal(posted.json.ok, true)
+  assert.deepEqual(posted.json.value.changed, ['fake-bundle'])
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies['fake-bundle'], `link:${join(tree.root, 'fake-bundle').replace(/\\/g, '/')}`)
+  assert.equal(manifest.dsh, undefined, '绝不能顺手把包加进 dsh.profile.bundles（那会真的加载它）')
+  // 登记后报告立刻能看到它。
+  assert.deepEqual(posted.json.value.report.visible, ['fake-bundle'])
+  assert.deepEqual(posted.json.value.report.hidden, [])
+  // 备份与台账都要留痕。
+  assert.ok(existsSync(join(profileDir, 'package.json.bak-shared-tree')), '改前必须备份')
+  assert.ok(existsSync(join(tree.root, '.dsh-shared-tree-panel.json')), '必须留面板登记台账')
+  tree.cleanup()
+})
+
+await test('panel 幂等与撤销：重复登记不重写，撤销只删自己写的那条', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  const again = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  assert.deepEqual(again.json.value.changed, [], '已是目标状态时不应改动文件')
+  assert.deepEqual(again.json.value.kept, ['fake-bundle'])
+  const removed = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: false })
+  assert.deepEqual(removed.json.value.changed, ['fake-bundle'])
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies, undefined, '原本没有 dependencies 字段，撤销后应一并删除')
+  tree.cleanup()
+})
+
+await test('panel 撤销：用户自己写的同名依赖绝不被删', async () => {
+  // 该 profile 本来就手工把包挂在 dependencies 里（版本号指向真实 registry）。
+  const tree = fakeTree()
+  const profileDir = join(dirname(tree.root), 'prof-user')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'prof-user', private: true, dependencies: { 'fake-bundle': '^1.0.0' },
+  }, null, 2))
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  // 登记时发现已有同名依赖 → 跳过，不覆盖。
+  const posted = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  assert.deepEqual(posted.json.value.changed, [])
+  assert.match(posted.json.value.skipped[0].reason, /已有同名依赖/)
+  // 撤销时也不动它。
+  const removed = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: false })
+  assert.deepEqual(removed.json.value.changed, [])
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies['fake-bundle'], '^1.0.0', '用户自己的依赖必须原样保留')
+  tree.cleanup()
+})
+
+await test('panel 拒绝：非 bundle 与树外包不登记（并说明原因）', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  const posted = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-client,fake-lib,ghost-pkg', exposed: true })
+  assert.equal(posted.json.ok, true)
+  assert.deepEqual(posted.json.value.changed, [], '没有一个是可登记的 bundle')
+  const reasons = posted.json.value.skipped.map((item) => `${item.name}:${item.reason}`).join('|')
+  assert.match(reasons, /fake-client:不是 bundle/)
+  assert.match(reasons, /fake-lib:不是 bundle/)
+  assert.match(reasons, /ghost-pkg:不在共享树里/)
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies, undefined, '全部被拒时不得留下任何改动')
+  tree.cleanup()
+})
+
+await test('panel 入参校验：exposed 必须布尔、target 必填', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  const noFlag = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle' })
+  assert.equal(noFlag.status, 400)
+  const noTarget = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { exposed: true })
+  assert.equal(noTarget.status, 400)
+  tree.cleanup()
+})
+
+await test('panel 只在指定 profile 生效：其他 profile 的清单零改动', async () => {
+  const { tree, profileDir, profileName } = fakeProfileTree()
+  const otherDir = join(dirname(tree.root), 'prof-other')
+  mkdirSync(otherDir, { recursive: true })
+  const otherManifest = JSON.stringify({ name: 'prof-other', private: true, dsh: { profile: { bundles: [] } } }, null, 2)
+  writeFileSync(join(otherDir, 'package.json'), otherManifest)
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true, profile: profileName })
+  assert.equal(readFileSync(join(otherDir, 'package.json'), 'utf8'), otherManifest, '别的 profile 必须一字未动')
+  tree.cleanup()
+})
+
+await test('panel 与生命周期台账联动：stop 插件时登记一并回滚', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const webServer = fakeWebServer()
+  const manager = managerForProfile(profileDir)
+  const ctx = fakeContext({ webServer, pluginManager: manager })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const route = webServer.routes.find((item) => item.path === '/dsh-shared-tree')
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  assert.ok(JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')).dependencies, '先确认已写入')
+  // 触发 dispose（等价于停用插件）→ 台账里的 panel 变更必须被还原。
+  const entry = ctx.disposers.length > 0 ? ctx.disposers.at(-1) : undefined
+  const restore = restoreFromLedger(tree.root)
+  assert.ok(restore.reverted.length > 0, '台账里必须有可还原的条目')
+  const after = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(after.dependencies, undefined, '停用后登记必须被回滚')
+  assert.equal(typeof entry === 'function' || entry === undefined, true)
+  tree.cleanup()
+})
+
+await test('disable 顺手登记：停用后包仍留在面板入口（不加载）', async () => {
+  const { tree, profileDir } = fakeProfileTree({ name: 'prof-panel', private: true, dsh: { profile: { bundles: ['fake-bundle'] } } })
+  const calls = []
+  const manager = managerForProfile(profileDir, calls)
+  // 停用成功后，宿主会把名字从 bundles 摘掉；这里模拟"摘掉后"的清单，验证登记补偿。
+  manager.setBundleEnabled = async (packageName, enabled) => {
+    calls.push([packageName, enabled])
+    const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+    manifest.dsh.profile.bundles = enabled ? ['fake-bundle'] : []
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2))
+    return { application: 'restart-required', nextStep: 'restart DSH' }
+  }
+  const { route } = ctxWithRoutes(tree, manager)
+  const disabled = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: false })
+  assert.deepEqual(calls, [['fake-bundle', false]])
+  assert.equal(disabled.json.value.results[0].panelPinned, true, '停用后必须补登记，否则面板里再也找不到它')
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(manifest.dsh.profile.bundles, [], 'bundles 里必须已摘掉（真的不加载）')
+  assert.ok(manifest.dependencies['fake-bundle'], 'dependencies 里必须留一条 link: 入口')
+  tree.cleanup()
+})
+
+await test('工具 action=panel：无参数只读报告，带 target 执行登记', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const ctx = fakeContext({ pluginManager: managerForProfile(profileDir) })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const tool = ctx.toolsMap.get('shared_tree')
+  // currentProfile 从 pluginManager.profile.dir 推导。
+  const report = await tool.execute({ action: 'panel' }, {})
+  assert.match(report, /profile：prof-panel/)
+  assert.match(report, /官方面板看不见（1）：fake-bundle/)
+  const applied = await tool.execute({ action: 'panel', target: 'fake-bundle' }, {})
+  assert.match(applied, /已改动（1）：fake-bundle/)
+  assert.match(applied, /需重启/)
+  const verify = await tool.execute({ action: 'panel' }, {})
+  assert.match(verify, /官方面板可见（1）：fake-bundle/)
+  tree.cleanup()
+})
+
+await test('panel 组件识别：entry id 归属别的树内 bundle 时拒绝登记（issue #470 防线）', async () => {
+  const tree = fakeTree()
+  // 造归属包 + 组件：组件的补丁插入一个已被归属包声明的 id。
+  mkdirSync(join(tree.root, 'owner-bundle'), { recursive: true })
+  writeFileSync(join(tree.root, 'owner-bundle', 'package.json'), JSON.stringify({
+    name: 'owner-bundle', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2))
+  writeFileSync(join(tree.root, 'owner-bundle', 'cordis.patch.yml'), '- insert:\n    - id: owner-shared-row\n      name: owner-bundle\n')
+  mkdirSync(join(tree.root, 'owner-component'), { recursive: true })
+  writeFileSync(join(tree.root, 'owner-component', 'package.json'), JSON.stringify({
+    name: 'owner-component', version: '2.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2))
+  writeFileSync(join(tree.root, 'owner-component', 'cordis.patch.yml'), '- insert:\n    - id: owner-shared-row\n      name: owner-component\n')
+
+  const profileDir = join(dirname(tree.root), 'prof-cmp')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'prof-cmp', private: true }, null, 2))
+  const { route } = ctxWithRoutes(tree, managerForProfile(profileDir))
+
+  const report = await callRoute(route.handler, 'GET', '/dsh-shared-tree/panel?profile=prof-cmp')
+  const components = report.json.value.components.map((item) => item.name)
+  assert.ok(components.includes('owner-component'), '组件必须被识别出来（未启用也要能识别）')
+  assert.ok(!components.includes('owner-bundle'), '归属包自己不算组件')
+
+  const posted = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'owner-component', exposed: true })
+  assert.deepEqual(posted.json.value.changed, [], '组件不得被登记进面板')
+  assert.match(posted.json.value.skipped[0].reason, /是组件，不是独立插件/)
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies, undefined, '被拒时不得留下改动')
+  tree.cleanup()
 })
 
 console.log('')

@@ -26,10 +26,33 @@
 组件子行没有独立开关（它们的 entry id 已由归属包提供，单独启用会重复插入 id 触发 issue #470），
 开关由归属包状态 + profile patch 行控制。
 
-**点行直达官方配置页**：本 profile 已启用的插件，点行直接跳官方 Plugins 页里该插件自己的配置面板
-（宿主 `pluginNavigation.openBundle`，由官方 dsh-client-ui-plugin-manager 提供）；
-未启用、宿主没这个服务或包只存在于树里时，回退到本插件的自建详情页。
-自建详情页头部也有「配置页」按钮可随时跳转。
+**点行直达官方配置页**：有 `dsh.bundle` 且不是「组件」的包，点行直接跳官方 Plugins 页里该插件
+自己的配置面板（宿主 `pluginNavigation.openBundle`）；面板列不出它时先自动把它登记成当前
+profile 的 `link:` 依赖（见下），再跳转。跳转失败（宿主没这个服务 / 登记被拒）或点的是组件时，
+回退到本插件的自建详情页。详情页头部另有「配置页」与「加入插件面板」两个按钮。
+
+## 官方面板可见性（panel）
+
+**根因**：官方 Plugins 面板的数据源是宿主 `pluginManager.readBundles()`，它的候选集合
+**只来自 profile 清单**（`dsh.profile.bundles` ∪ `dependencies` ∪ 安装目录 ∪ 官方目录），
+从不 readdir `profiles/node_modules`。所以共享树里放着的包、一旦没有进当前 profile 的清单
+（从未启用过 / 被停用摘掉了名字），面板就再也列不出它——它"消失"了。
+
+**修复**：把包登记为当前 profile 的 `dependencies[name] = "link:<树内绝对路径>"`。
+- 只写 dependencies，**绝不写 `dsh.profile.bundles`**——包不会被加载，停用/隔离语义不变；
+- 面板因此能看到它（`installed: true / enabled: false`），可打开配置页、可在面板里自行启用；
+- 只改**指定的那一个 profile**，其他 profile 与共享树目录零改动；
+- 「组件」（entry id 已由树内另一个 bundle 声明，如 `dsh-mnemon-strategy-*`）一律拒登记
+  ——在面板里出现独立开关只会诱发 issue #470；
+- 用户自己写的同名依赖绝不覆盖、绝不删除（撤销只回退本插件写的那一条）；
+- 改前备份 `package.json.bak-shared-tree`，写入面板台账 `.dsh-shared-tree-panel.json`，
+  并记进生命周期台账（停用插件时随还原一起回滚）。
+
+入口：
+- 工具：`shared_tree action=panel`（无 target=只读报告；`target=a,b expose=true|false` 执行登记/撤销）。
+- HTTP：`GET/POST /dsh-shared-tree/panel`。
+- 界面：点行跳转时自动执行；详情页「加入插件面板」按钮手动执行；`disable` 停用后自动补登记。
+- 需重启 DSH（或该 profile）后官方面板才会重新拉取清单。
 
 面板底部还有一个**只读分区**，列出本 profile 以 `link:` 本地路径安装的插件
 （桌面实测 7 条，含 `dsh-shared-tree` 自己），标 `linked` 徽标与原始路径。
@@ -51,6 +74,8 @@ shared_tree action=search kind=bundle
 shared_tree action=install packages=["dsh-taskboard@0.10.0"]
 shared_tree action=enable target=dsh-taskboard
 shared_tree action=verify
+shared_tree action=panel
+shared_tree action=panel target=dsh-douyin,dsh-config-manager
 ```
 
 ## 为什么放在 profiles/node_modules

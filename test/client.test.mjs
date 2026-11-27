@@ -266,7 +266,7 @@ await test('slots 注册抛错时不连累其他入口', () => {
 await test('写请求白名单：/set、/install、/rollback、/check-profiles、/set-profile', () => {
   const calls = [...SOURCE.matchAll(/postJson\(\s*('([^']+)'|`([^`]+)`)/g)].map((m) => m[2] ?? m[3])
   assert.ok(calls.length > 0, '客户端必须显式声明写请求路径')
-  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry', '/set-row', '/lifecycle-baseline-restore'])
+  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry', '/set-row', '/lifecycle-baseline-restore', '/panel'])
   for (const path of calls) {
     assert.ok(allowed.has(path), `不允许的写请求：${path}`)
   }
@@ -486,6 +486,18 @@ await test('详情/调试契约：功能项开关、profile 覆盖层、整行�
   assert.ok(SOURCE.includes('nav.openBundle('), '跳转必须走 pluginNavigation.openBundle')
   assert.ok(SOURCE.includes('openOfficialConfig(item.name)'), '行点击必须先尝试跳官方配置页')
   assert.ok(SOURCE.includes('openOfficialConfig(name)'), '详情页必须有配置页按钮')
+})
+
+await test('面板可见性契约：跳转前先问面板自己的数据源，列不出就先登记', () => {
+  // 面板的数据源是宿主 pluginManager.listBundles()，不是共享树目录；不能在客户端猜。
+  assert.ok(SOURCE.includes('remote?.pluginManager'), '必须问宿主的 pluginManager，不能猜')
+  assert.ok(SOURCE.includes('listBundles()'), '可见性必须来自 listBundles（面板同源数据）')
+  assert.ok(SOURCE.includes('ensurePanelVisible'), '跳转前必须有 ensurePanelVisible')
+  assert.ok(SOURCE.includes("postJson('/panel'"), '登记必须走 /panel 路由')
+  assert.ok(/async function openOfficialConfig/.test(SOURCE), '跳转必须异步（先登记再跳）')
+  assert.ok(SOURCE.includes('panelPin'), '详情页要有手动"加入插件面板"按钮')
+  // 组件（entry id 归属别的插件）绝不能走官方跳转：它不该作为独立 bundle 出现。
+  assert.ok(/item\.hasBundle === true && item\.standaloneConflict === undefined/.test(SOURCE), '组件必须回退自建详情')
 })
 
 await test('原版详情复刻契约：描述文档 + 行级功能开关（原版布局与写入链路）', () => {
