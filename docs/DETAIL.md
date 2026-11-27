@@ -120,7 +120,12 @@ shared_tree action=disable target=dsh-taskboard
 |---|---|
 | `GET /dsh-shared-tree/status` | 插件列表（含 `hasBundle` / `hasClient` / `kind` / `version` / `enabled` / `components`）+ `linked` 只读分区 + 计数 + junction 健康 + 清单摘要 |
 | `GET /dsh-shared-tree/lifecycle` | 生命周期状态（只读展示：是否初始化、基线 profile 数、台账变更数） |
+| `GET /dsh-shared-tree/deps` | registry 最新版本 + 依赖检查（可升级判据与确认弹窗的数据源） |
+| `GET /dsh-shared-tree/impact` | 升级影响面（哪些 profile 引用该包） |
+| `GET /dsh-shared-tree/install/progress` | 升级任务进度（四阶段） |
 | `POST /dsh-shared-tree/panel` | `{ target, exposed, profile? }` → 登记/撤销 `link:` 依赖，让包重新出现在官方 Plugins 面板（不加载） |
+| `POST /dsh-shared-tree/install` | `{ packages, replace }` → 覆盖式升级（任务化，同一时刻只允许一个） |
+| `POST /dsh-shared-tree/check-profiles` | 升级完成后逐 profile 验证版本一致性 |
 
 一致性是**结构保证**的，不靠约定：
 
@@ -129,8 +134,9 @@ shared_tree action=disable target=dsh-taskboard
   共用 `autoPanelSync` / `autoPinOne`，底层仍是同一个 `setPanelVisibility`。
 
 界面内的搜索与过滤是**纯浏览器侧**数组过滤，不发任何写请求。
-客户端唯一的写请求是 `/panel`（点独立 bundle 行跳转前登记面板可见性）；
-**启用/停用、装包、升级、功能行开关都不在界面里做**（归官方 Plugins 页与 `shared_tree` 工具 / 其余 HTTP 路由）。
+客户端写请求只有三个：`/panel`（点独立 bundle 行跳转前登记面板可见性）、
+`/install`（行内「升级」按钮触发的覆盖式升级）、`/check-profiles`（升级后逐 profile 验证）；
+**启用/停用、装包、功能行开关都不在界面里做**（归官方 Plugins 页与 `shared_tree` 工具 / 其余 HTTP 路由）。
 
 ### 点行行为与已删除的界面能力（2026-11-27 精简）
 
@@ -140,11 +146,27 @@ shared_tree action=disable target=dsh-taskboard
 | 组件（entry id 归属树内另一个 bundle） | 不跳转，提示去归属插件的设置页切换 |
 | 仅 client 包 | 不跳转，提示没有 bundle 配置页、去官方 Plugins 页管理 |
 
-已删除：行内「启用/关闭」「详情」「功能」「升级」按钮、行内功能行展开、自建详情页
+已删除：行内「启用/关闭」「详情」「功能」按钮、行内功能行展开、自建详情页
 （描述/功能开关/依赖检查/版本回滚/逐 profile 灰度/功能项覆盖/调试）、详情页「配置页」与
-「加入插件面板」按钮、升级确认弹窗与任务进度卡、「校验」按钮、生命周期「恢复到基线」按钮。
-**服务端路由与工具 action 全部保留**（`/set`、`/rows`、`/set-row`、`/detail`、`/install`、
+「加入插件面板」按钮、「校验」按钮、生命周期「恢复到基线」按钮。
+**服务端路由与工具 action 全部保留**（`/set`、`/rows`、`/set-row`、`/detail`、
 `/rollback`、`/verify`、`/lifecycle-baseline-restore` 等仍可经工具或 HTTP 使用），只是客户端不再调用。
+
+### 升级能力（2026-11-27 恢复，长期保留）
+
+以 `38555d5` 删除前的实现为基准恢复，不另起机制：
+
+| 环节 | 实现 | 与删除前的关系 |
+|---|---|---|
+| 可升级判据 | `GET /deps?pkg=<名>&ver=latest`：`available===true` 且 `version !== 树内版本` | 同源（原 DetailPanel 的 upToDate 判据） |
+| 检查入口 | 顶部「检查更新」按钮 + 挂载后自动检查一次；顶部汇总「N 个插件有新版本」 | 新增（原为逐包进详情页查看） |
+| 升级入口 | 行内「升级」按钮（仅检查出有新版本时出现）+ 版本旁 `→ v新版本` | 同源（原行内按钮） |
+| 确认弹窗 | `ConfirmModal`：精确版本锁定 + 影响面（`/impact`）+ 依赖检查（`ok===false` 置灰） | 同源，依赖检查从原 depsSection 移入 |
+| 执行通道 | `POST /install`（`replace:true`）→ `JobCard` 四阶段进度（800ms 轮询 `/install/progress`） | 同源 |
+| 完成反馈 | `POST /check-profiles` 逐 profile 验证 + `load()` 刷新列表 + 清空可升级缓存 | 同源 |
+
+升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做；
+行点击仍 `ensurePanelVisible()` → `openBundle()`，组件/client-only 仍只给 notice。
 
 ### 默认登记进官方面板（2026-11-27）
 
@@ -211,8 +233,9 @@ shared_tree action=verify    # 逐包复核 sha256，报告版本漂移/内容�
 2. **没有 lockfile 守护**。这份目录没有 `package.json`/`pnpm-lock.yaml`，pnpm 不会替你校验完整性。改动只能靠 `.dsh-shared-tree.json` 的 sha256 复核。
 3. **升级即全局生效**。树里的包被所有 profile 共用，升级会同时影响全部引用者，改前先备份并逐 profile 实跑。
 4. **`@deepseek-ai/*` 只读**。本插件拒绝向该 scope 写入。
-5. **界面不做写操作（除面板登记）**。`install` / `enable` / `disable` / `verify` / 升级回滚只走
-   `shared_tree` 工具、CLI 或官方 Plugins 页；客户端唯一的写请求是 `/panel`（登记面板可见性）。
+5. **界面写操作受限**。客户端写请求只有 `/panel`（面板登记）、`/install`（升级）、
+   `/check-profiles`（升级后验证）；`enable` / `disable` / `verify` / 回滚只走
+   `shared_tree` 工具、CLI 或官方 Plugins 页。
 6. **启用态以 Host 为准，界面不缓存**。界面每次刷新都重拉 `/status`；`restart-required` 的包
    在 `listBundles()` 里仍是旧状态，需要重启后才会在界面与官方面板里更新。
 7. **界面渲染未做浏览器实测**。契约层（槽位注册、inject 行为、locale、只读、配色）已用测试钉住，

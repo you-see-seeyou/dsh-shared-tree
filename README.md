@@ -28,7 +28,7 @@
 
 ### 点行行为（2026-11-27 精简后）
 
-面板是共享树的**只读目录 + 跳转入口**，不再自建任何详情页，也不提供功能按钮：
+面板是共享树的**目录 + 跳转入口 + 升级入口**，不再自建详情页：
 
 | 行类型 | 点击行为 |
 |---|---|
@@ -36,13 +36,25 @@
 | 组件（entry id 已由树内另一个 bundle 提供） | **不跳转**，提示「请在归属插件的设置页里切换」 |
 | 仅 client 包（只有 `dsh.client`） | **不跳转**，提示「没有 bundle 配置页，请到官方 Plugins 页管理」 |
 
-启用/停用、升级、回滚、功能行开关、描述文档一律在**官方 Plugins 页**（或 `shared_tree` 工具）里做。
-整个面板只有一个按钮：**刷新**。
+启用/停用、功能行开关、描述文档一律在**官方 Plugins 页**（或 `shared_tree` 工具）里做。
+
+### 升级能力（2026-11-27 恢复，长期保留）
+
+- **检查更新**：顶部「检查更新」按钮（挂载后自动检查一次），对每个插件包问
+  `GET /deps?pkg=<名>&ver=latest`；顶部汇总「N 个插件有新版本」。
+- **可升级判据**（与删除前同源）：`deps.available === true` 且 `deps.version !== 树内版本`。
+  registry 不可达的包不显示升级按钮。
+- **行内「升级」按钮**：只在检查出有新版本时出现，版本号旁显示 `→ v新版本`；
+  点击弹**确认弹窗**（精确版本锁定 + 影响面列表 + 依赖检查，`ok===false` 时开始按钮置灰）。
+- **执行通道**：`POST /install`（`replace: true` 覆盖升级）→ 四阶段进度卡
+  （prepare/build/merge/verify，800ms 轮询 `/install/progress`）→ 完成后
+  `POST /check-profiles` 逐 profile 验证 + 列表刷新到最新版本。
+- 升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做。
 
 已删除的界面能力（服务端路由与工具 action 保持不变，仍可经工具/HTTP 使用）：
-行内「启用/关闭」「详情」「功能」「升级」按钮、行内功能行展开开关、自建详情页
+行内「启用/关闭」「详情」「功能」按钮、行内功能行展开开关、自建详情页
 （描述文档 / 功能开关 / 依赖检查 / 版本回滚 / 逐 profile 灰度 / 功能项覆盖 / 调试 七个区块）、
-详情页「配置页」「加入插件面板」按钮、升级确认弹窗与任务进度卡、「校验」按钮、
+详情页「配置页」「加入插件面板」按钮、「校验」按钮、
 生命周期「恢复到基线」按钮（状态条保留为只读）。
 
 ## 官方面板可见性（panel）
@@ -83,8 +95,10 @@
 分区内没有按钮，也**不计入** `total / plugins / components / libraries` 任何计数
 （只多一个 `counts.linked`）；这些包物理上不在共享树里，启停请用 Plugins 页。
 
-界面数据来自 Host 的只读路由 `/dsh-shared-tree/status`、`/dsh-shared-tree/lifecycle`，
-唯一的写请求是 `POST /dsh-shared-tree/panel`（跳转前登记面板可见性）。
+界面数据来自 Host 的只读路由 `/dsh-shared-tree/status`、`/dsh-shared-tree/lifecycle`、
+`/dsh-shared-tree/deps`、`/dsh-shared-tree/impact`、`/dsh-shared-tree/install/progress`，
+写请求只有三个：`POST /panel`（跳转前登记面板可见性）、`POST /install`（升级）、
+`POST /check-profiles`（升级后逐 profile 验证）。
 搜索与过滤全在浏览器内完成，不发写请求。启用/停用等写操作归官方 Plugins 页与 `shared_tree` 工具。
 
 三处注册各自 try/catch：任何一处失败（例如宿主没有 `sidebarRightTabs`）只少一个入口，
@@ -114,8 +128,9 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 - **组合包整族进** —— `dsh-mnemon` 需要 18 个子包 + `zod`/`yaml`/`fflate`，install 算的是依赖闭包。
 - **零 `@deepseek-ai` 依赖** —— Host 与客户端两侧都只用 Node 内置模块 / `react`。
   客户端尤其不 require `@deepseek-ai/dsh-client-*`：那些包会在版本间变化，且抛错的组件会让槽位直接空白。
-- **界面只读** —— 客户端唯一的写请求是 `/dsh-shared-tree/panel`（登记面板可见性，不加载插件）；
-  启用/停用、装包、升级都不在界面里做，归官方 Plugins 页与工具。
+- **界面写操作受限** —— 客户端写请求只有 `/panel`（登记面板可见性，不加载插件）、
+  `/install`（升级，覆盖式）、`/check-profiles`（升级后验证）；
+  启用/停用、装包不在界面里做，归官方 Plugins 页与工具。
 
 完整说明与已知限制见 [docs/DETAIL.md](docs/DETAIL.md)。
 
@@ -128,9 +143,10 @@ npm test
 - `test/shared-tree.test.mjs` —— Host 侧 80 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
   `safetyNote` + 只读保证 + 面板可见性登记/撤销/组件拒登记/生命周期联动 +
   **默认登记：启用后自动登记、幂等、不覆盖用户依赖、启动补扫存量、跳过组件、撤销尊重**）。
-- `test/client.test.mjs` —— 客户端契约 28 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
+- `test/client.test.mjs` —— 客户端契约 29 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
   竞态保护、类别过滤与工具同源、未知状态、可访问性、无硬编码配色、
-  **精简契约：功能按钮与自建详情页不得复活、写请求白名单只剩 /panel**）。
+  **精简契约：自建详情页与无关按钮不得复活（升级能力除外）、写请求白名单 /panel+/install+/check-profiles**、
+  **升级能力契约：可升级判据、确认弹窗、进度轮询、完成后刷新**）。
 - `test/lifecycle.test.mjs` —— 生命周期 13 项。
 
 渲染后的视觉表现需要有浏览器才能确认；无浏览器控制时只能验证到契约层。

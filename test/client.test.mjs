@@ -266,37 +266,69 @@ await test('slots 注册抛错时不连累其他入口', () => {
   assert.ok(names.includes('sidebar.panellist'), '第一处失败后第二处仍应注册')
 })
 
-await test('写请求白名单：精简后客户端只允许 POST /panel（登记面板可见）', () => {
+await test('写请求白名单：/panel（登记面板可见）+ 升级通道 /install、/check-profiles', () => {
   const calls = [...SOURCE.matchAll(/postJson\(\s*('([^']+)'|`([^`]+)`)/g)].map((m) => m[2] ?? m[3])
   assert.ok(calls.length > 0, '客户端必须显式声明写请求路径')
-  const allowed = new Set(['/panel'])
+  const allowed = new Set(['/panel', '/install', '/check-profiles'])
   for (const path of calls) {
     assert.ok(allowed.has(path), `不允许的写请求：${path}`)
   }
-  // 已删除的功能按钮对应的路由一个都不得再出现（含注释以外的任何引用）。
-  for (const gone of ['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry', '/set-row', '/lifecycle-baseline-restore', '/impact', '/deps', '/entries', '/debug', '/detail', '/rows']) {
+  // 升级通道必须真的被使用（2026-11-27 恢复的长期保留功能）。
+  assert.ok(calls.includes('/install'), '升级必须走 POST /install')
+  assert.ok(calls.includes('/check-profiles'), '升级完成后必须调 /check-profiles 出验证结果卡')
+  // 已删除的功能按钮对应的路由一个都不得再出现（升级相关的 /install、/check-profiles、/impact、/deps 除外）。
+  for (const gone of ['/set', '/rollback', '/set-profile', '/set-entry', '/set-row', '/lifecycle-baseline-restore', '/entries', '/debug', '/detail', '/rows']) {
     assert.ok(!SOURCE.includes(gone), `已删除的路由不得再出现：${gone}`)
   }
 })
 
-await test('精简契约：功能按钮与自建详情页不得复活', () => {
+await test('精简契约：自建详情页与无关功能按钮不得复活（升级能力除外）', () => {
   // 组件级死代码检查：这些组件/函数整体删除，任何引用都算复活。
-  for (const gone of ['DetailPanel', 'ConfirmModal', 'JobCard', 'SmallSwitch', 'renderMarkdown', 'toneOf', 'checkKindLabel']) {
+  // ConfirmModal / JobCard / checkKindLabel 属升级能力，2026-11-27 恢复，不在禁止之列。
+  for (const gone of ['DetailPanel', 'SmallSwitch', 'renderMarkdown', 'toneOf']) {
     assert.ok(!SOURCE.includes(gone), `已删除的组件/函数不得再出现：${gone}`)
   }
-  // 按钮文案（中英字典 key）不得残留。
+  // 按钮文案（中英字典 key）不得残留（升级相关 key 已恢复，不在禁止之列）。
+  // 只扫字典区：job 对象的 detail 字段是升级进度卡的合法数据，不是文案 key。
+  const dictSource = SOURCE.slice(SOURCE.indexOf('en: {'), SOURCE.indexOf('},\n    }'))
   for (const gone of [
-    'enable', 'disable', 'upgrade', 'rollback', 'detail', 'back', 'panelPin', 'panelPinned',
+    'enable', 'disable', 'rollback', 'detail', 'back', 'panelPin', 'panelPinned',
     'openConfig', 'rowsShow', 'rowsHide', 'lifeBaseline', 'verify', 'working', 'pendingTag',
     'tabDoc', 'tabUpgrade', 'tabVersion', 'tabProfiles', 'docSection', 'rowsSection',
     'featuresTitle', 'debugTitle', 'impactTitle', 'depsTitle', 'versionTitle',
   ]) {
-    assert.ok(!new RegExp(`\\b${gone}:`).test(SOURCE), `已删除的文案 key 不得残留：${gone}`)
+    assert.ok(!new RegExp(`\\b${gone}:`).test(dictSource), `已删除的文案 key 不得残留：${gone}`)
   }
-  // 行内不得再有任何功能按钮：整个面板只允许「刷新」一个按钮。
+  // 按钮形态：刷新 + 检查更新 + 行内升级 + 弹窗取消/开始 + 进度卡关闭，共 6 处；
+  // 不得出现启用/停用、详情、功能展开等已删按钮。
   const buttons = [...SOURCE.matchAll(/h\('button'/g)]
-  assert.equal(buttons.length, 1, `面板只应有 1 个按钮（刷新），实际 ${buttons.length} 个`)
-  assert.ok(SOURCE.includes("t('refresh')"), '唯一的按钮必须是刷新')
+  assert.equal(buttons.length, 6, `面板应有 6 个按钮（刷新/检查更新/行内升级/取消/开始/进度卡关闭），实际 ${buttons.length} 个`)
+  assert.ok(SOURCE.includes("t('refresh')"), '必须有刷新按钮')
+  assert.ok(SOURCE.includes("t('checkUpdates')"), '必须有检查更新按钮')
+  assert.ok(SOURCE.includes("t('upgrade')"), '必须有行内升级按钮')
+})
+
+await test('升级能力契约：可升级判据、确认弹窗、进度轮询、完成后刷新（与 38555d5 删除前同源）', () => {
+  // 可升级判据：/deps?ver=latest 的 available===true 且 version !== 树内版本。
+  assert.ok(SOURCE.includes('/deps?pkg='), '可升级判据必须走 /deps（registry 最新版本 + 依赖检查）')
+  assert.ok(SOURCE.includes('&ver=latest'), '必须问 latest 版本')
+  assert.ok(/deps\.available !== true/.test(SOURCE), 'registry 不可达时不得显示升级按钮')
+  assert.ok(/deps\.version === item\.version/.test(SOURCE), '版本相同判为已是最新')
+  // 确认弹窗：精确版本锁定 + 影响面 + 依赖检查不通过置灰。
+  assert.ok(SOURCE.includes('ConfirmModal'), '必须有确认弹窗组件')
+  assert.ok(SOURCE.includes('affectedProfiles'), '弹窗必须展示"影响 N 个 profile"')
+  assert.ok(SOURCE.includes('upgradeBlocked'), '依赖检查 ok===false 时开始按钮必须置灰')
+  assert.ok(SOURCE.includes("useState(true)"), '精确版本锁定默认开启')
+  // 执行通道：POST /install 总是覆盖（replace:true），四阶段进度轮询。
+  assert.ok(SOURCE.includes('replace: true'), 'install 请求必须显式 replace:true（覆盖升级）')
+  assert.ok(SOURCE.includes("['prepare', 'build', 'merge', 'verify']"), '四阶段顺序必须固定')
+  assert.ok(SOURCE.includes('JobCard'), '必须有任务进度卡组件')
+  assert.ok(SOURCE.includes('/install/progress'), '进度必须轮询任务接口')
+  // 完成后：逐 profile 验证 + 列表刷新 + 清掉旧的可升级缓存。
+  assert.ok(SOURCE.includes("postJson('/check-profiles'"), '升级完成后必须出逐 profile 验证结果')
+  assert.ok(/setUpdates\(\{\}\)/.test(SOURCE), '升级完成后必须清掉旧的可升级缓存')
+  // 行内升级按钮必须 stopPropagation，避免误触发行点击跳转。
+  assert.ok(/event\.stopPropagation\(\); void openConfirm/.test(SOURCE), '升级按钮必须 stopPropagation')
 })
 
 await test('样式只用主题 token 或透明值，没有硬编码配色（图标除外）', () => {
@@ -311,7 +343,10 @@ await test('样式只用主题 token 或透明值，没有硬编码配色（图�
   const css = SOURCE.slice(stylesStart, stylesEnd) + SOURCE.slice(templateStart, templateEnd)
 
   const hexColors = [...css.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((m) => m[0])
-  assert.deepEqual(hexColors, [], `样式区出现硬编码颜色：${hexColors.join(', ')}`)
+  // 允许作为 token 缺省值的少量兜底色（#3b6ef5 / #fff，升级 UI 恢复后与删除前一致），其余不允许。
+  const allowed = new Set(['#3b6ef5', '#fff'])
+  const offending = hexColors.filter((value) => !allowed.has(value))
+  assert.deepEqual(offending, [], `样式区出现硬编码颜色：${offending.join(', ')}`)
   assert.ok(!/rgba?\(\s*\d/.test(css.replace(/rgba\(127,\s*127,\s*127/g, '')), '不应出现硬编码 rgb 颜色')
   // 兜底：样式区必须真的引用了主题 token，否则上面的检查会变成空转
   assert.ok((css.match(/--dsw-alias-/g) ?? []).length > 10, '样式区应大量引用 --dsw-alias-* token')
