@@ -26,6 +26,11 @@
 组件子行没有独立开关（它们的 entry id 已由归属包提供，单独启用会重复插入 id 触发 issue #470），
 开关由归属包状态 + profile patch 行控制。
 
+**点行直达官方配置页**：本 profile 已启用的插件，点行直接跳官方 Plugins 页里该插件自己的配置面板
+（宿主 `pluginNavigation.openBundle`，由官方 dsh-client-ui-plugin-manager 提供）；
+未启用、宿主没这个服务或包只存在于树里时，回退到本插件的自建详情页。
+自建详情页头部也有「配置页」按钮可随时跳转。
+
 面板底部还有一个**只读分区**，列出本 profile 以 `link:` 本地路径安装的插件
 （桌面实测 7 条，含 `dsh-shared-tree` 自己），标 `linked` 徽标与原始路径。
 分区内没有按钮，也**不计入** `total / plugins / components / libraries` 任何计数

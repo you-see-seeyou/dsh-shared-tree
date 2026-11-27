@@ -1205,7 +1205,9 @@ await test('apply 通过 ctx.effect 注册停用还原；fake ctx 的 disposer �
   const entry = effects.find((item) => item.label === 'dsh-shared-tree: lifecycle restore')
   assert.ok(entry !== undefined, '必须注册 lifecycle restore 的 effect')
   // 手动触发 dispose：还原跑在假树上不炸（台账无变更 → 空还原）。
-  assert.doesNotReject(() => entry.callback())
+  // callback 同步返回 undefined、异步返回 promise，两种形态都不能炸。
+  const outcome = entry.callback()
+  if (outcome !== undefined && outcome !== null && typeof outcome.then === 'function') await outcome
   // 没有 ctx.effect 的宿主（异常环境）也不得崩。
   const plain = fakeContext()
   assert.doesNotThrow(() => apply(plain, { treeRoot: tree.root, buildDir: tree.buildDir }))

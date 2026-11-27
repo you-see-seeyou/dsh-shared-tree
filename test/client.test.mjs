@@ -481,6 +481,11 @@ await test('详情/调试契约：功能项开关、profile 覆盖层、整行�
   // 整行可点：rowMain 的 onClick 直接进详情；行内按钮必须 stopPropagation 防误触。
   assert.ok(/rowMain,\s*cursor:\s*'pointer'/.test(SOURCE), 'rowMain 必须 pointer + 可点')
   assert.ok((SOURCE.match(/event\.stopPropagation\(\)/g) ?? []).length >= 3, '行内按钮都要 stopPropagation')
+  // 已启用的插件：点行跳官方 Plugins 页该插件自己的配置面板（宿主 pluginNavigation.openBundle）。
+  assert.ok(SOURCE.includes("get?.('pluginNavigation')"), '必须懒取宿主 pluginNavigation 服务')
+  assert.ok(SOURCE.includes('nav.openBundle('), '跳转必须走 pluginNavigation.openBundle')
+  assert.ok(SOURCE.includes('openOfficialConfig(item.name)'), '行点击必须先尝试跳官方配置页')
+  assert.ok(SOURCE.includes('openOfficialConfig(name)'), '详情页必须有配置页按钮')
 })
 
 await test('原版详情复刻契约：描述文档 + 行级功能开关（原版布局与写入链路）', () => {
