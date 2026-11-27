@@ -163,7 +163,7 @@ shared_tree action=disable target=dsh-taskboard
 | 升级入口 | 行内「升级」按钮（仅检查出有新版本时出现）+ 版本旁 `→ v新版本` | 同源（原行内按钮） |
 | 确认弹窗 | `ConfirmModal`：精确版本锁定 + 影响面（`/impact`）+ 依赖检查（`ok===false` 置灰） | 同源，依赖检查从原 depsSection 移入 |
 | 执行通道 | `POST /install`（`replace:true`）→ `JobCard` 四阶段进度（800ms 轮询 `/install/progress`） | 同源 |
-| 完成反馈 | `POST /check-profiles` 逐 profile 验证 + `load()` 刷新列表 + 清空可升级缓存 | 同源 |
+| 完成反馈 | `POST /check-profiles` 逐 profile 验证 + `load()` 刷新列表 + 清空可升级缓存；**成功后 6 秒自动收起进度卡**（结论落到通知区；失败不自动收起） | 同源 + 自动收起（新增） |
 
 升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做；
 行点击仍 `ensurePanelVisible()` → `openBundle()`，组件/client-only 仍只给 notice。

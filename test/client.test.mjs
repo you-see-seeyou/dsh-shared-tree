@@ -338,6 +338,26 @@ await test('升级能力契约：可升级判据、确认弹窗、进度轮询�
   assert.ok(SOURCE.includes('checkingProgress'), '按钮/提示要有 {done}/{total} 进度文案')
 })
 
+await test('升级成功后进度卡自动收起（失败不自动收起，结论落到通知区）', () => {
+  const pollBody = SOURCE.slice(
+    SOURCE.indexOf("getJson('/install/progress')") - 400,
+    SOURCE.indexOf('}, 800)'),
+  )
+  // 自动收起只在 done 分支：必须有延时收起，且用 state==='done' 守卫（避免覆盖新一轮任务）。
+  assert.ok(/JOB_AUTO_DISMISS_MS/.test(SOURCE), '必须有自动收起延时常量')
+  assert.match(pollBody, /value\.state === 'done'/, '只有成功才走自动收起分支')
+  assert.match(pollBody, /setTimeout\(/, '必须用延时收起（让用户看清逐 profile 验证结论）')
+  assert.match(pollBody, /prev\.state === 'done' \? null : prev/, '收起前必须校验仍是 done 态（不误关新一轮任务）')
+  // 失败态绝不自动收起：错误原因必须留在界面上让用户读。
+  const doneBlock = pollBody.slice(pollBody.indexOf("value.state === 'done'"))
+  assert.ok(!/value\.state === 'failed'[\s\S]{0,400}setTimeout/.test(pollBody), '失败分支不得自动收起')
+  // 结论必须落到通知区（组件收起后仍有记录）。
+  assert.match(pollBody, /setNotice\(\{[\s\S]*?tone: 'ok'/, '成功结论必须落到 notice（收起后不丢信息）')
+  // 卡片上要提前告知会自动收起。
+  assert.ok(SOURCE.includes('jobAutoDismissHint'), '进度卡要提示"几秒后自动收起"')
+  assert.ok(SOURCE.includes('jobDoneHint'), '通知文案要说明列表已刷新')
+})
+
 await test('样式只用主题 token 或透明值，没有硬编码配色（图标除外）', () => {
   // 只扫真正承载样式的那两段：styles 对象 + <style> 模板。
   // 扫全文会把注释和文案里的 issue #470 之类编号误判成颜色。
