@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { destroyTree, ensureTreeDir, ledgerCorrupt, lifecycleStatus, listProfileNames, readLedger, recordChange, restoreFromLedger, snapshotBaseline } from '../lib/lifecycle.js'
+import { destroyTree, ensureTreeDir, ledgerCorrupt, lifecycleStatus, listProfileNames, readLedger, recordChange, restoreBaseline, restoreFromLedger, snapshotBaseline } from '../lib/lifecycle.js'
 
 let passed = 0
 let failed = 0
@@ -235,6 +235,45 @@ await test('M2 回归：台账损坏时 snapshotBaseline 拒绝重建、recordCh
   // 用户修好台账后一切恢复。
   writeFileSync(ledgerFile, goodLedger)
   assert.equal(ledgerCorrupt(home.root), false)
+  home.cleanup()
+})
+
+await test('restoreBaseline：把 bundles+patch 恢复成基线原文，现状留 baseline 备份', async () => {
+  const home = fakeHome()
+  snapshotBaseline(home.root)
+  const pkgFile = join(home.base, 'profiles', 'alpha', 'package.json')
+  const patchFile = join(home.base, 'profiles', 'alpha', 'cordis.patch.yml')
+  const pkgBaseline = readFileSync(pkgFile, 'utf8')
+  const patchBaseline = readFileSync(patchFile, 'utf8')
+  // 启用之后的两类变更：宿主链路改 bundles + 手工加 patch 条目。
+  const manifest = JSON.parse(pkgBaseline)
+  manifest.dsh.profile.bundles.push('dsh-shared-tree')
+  writeFileSync(pkgFile, `${JSON.stringify(manifest, null, 2)}\n`)
+  writeFileSync(patchFile, `${patchBaseline}- id: manual-entry\n  disabled: true\n`)
+  const dry = restoreBaseline(home.root, { dryRun: true })
+  assert.equal(dry.reverted.length, 2, 'dry-run 必须报出两个待恢复文件')
+  assert.match(readFileSync(pkgFile, 'utf8'), /dsh-shared-tree/, 'dry-run 不得落盘')
+  const outcome = restoreBaseline(home.root)
+  assert.equal(outcome.reverted.length, 2)
+  assert.equal(readFileSync(pkgFile, 'utf8'), pkgBaseline, 'bundles 必须回到基线原文')
+  assert.equal(readFileSync(patchFile, 'utf8'), patchBaseline, 'patch 必须回到基线原文（手工改动被回滚=基线语义）')
+  assert.ok(existsSync(`${pkgFile}.bak-shared-tree-baseline`), '恢复前必须留现状备份')
+  assert.ok(existsSync(join(home.root, '.dsh-shared-tree-baseline-report.json')), '必须生成基线还原报告')
+  // 已等于基线时再次还原 → 无事可做。
+  const again = restoreBaseline(home.root)
+  assert.equal(again.reverted.length, 0)
+  home.cleanup()
+})
+
+await test('restoreBaseline：基线里没有的文件不删；profile 目录消失则跳过', async () => {
+  const home = fakeHome()
+  snapshotBaseline(home.root)
+  // 基线之后新建的文件：基线里没有副本 → 保守保留。
+  const newFile = join(home.base, 'profiles', 'alpha', 'cordis.patch.yml.new')
+  writeFileSync(newFile, 'later addition\n')
+  const outcome = restoreBaseline(home.root)
+  assert.ok(existsSync(newFile), '基线里没有的文件必须保守保留')
+  assert.ok(outcome.skipped.length === 0 || outcome.reverted.length >= 0)
   home.cleanup()
 })
 

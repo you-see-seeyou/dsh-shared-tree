@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { apply, inject, name } from '../lib/index.js'
+import { readLedger, restoreFromLedger } from '../lib/lifecycle.js'
 
 let passed = 0
 let failed = 0
@@ -1100,6 +1101,48 @@ await test('GET /debug 汇总加载状态、哈希一致性与引用面', async 
   assert.deepEqual(json.value.referenced, ['prof-a'])
   const missing = await callRoute(route.handler, 'GET', `/dsh-shared-tree/debug?pkg=${encodeURIComponent('no-such')}`)
   assert.equal(missing.json.ok, false)
+  tree.cleanup()
+})
+
+await test('缺口 A 回归：/set 走 manager（宿主落盘）后必须差异记账进台账', async () => {
+  const tree = fakeTree()
+  // 假 manager 真的改文件（模拟宿主写当前 profile 的 package.json）。
+  const profileDir = fakeProfile(tree, 'prof-a', ['fake-client'])
+  const pkgFile = join(profileDir, 'package.json')
+  const { route } = ctxWithRoutes(tree, {
+    listBundles: async () => [],
+    setBundleEnabled: async (target, enabled) => {
+      const manifest = JSON.parse(readFileSync(pkgFile, 'utf8'))
+      const bundles = manifest.dsh.profile.bundles
+      const next = enabled ? [...bundles, target] : bundles.filter((item) => item !== target)
+      manifest.dsh.profile.bundles = next
+      writeFileSync(pkgFile, `${JSON.stringify(manifest, null, 2)}\n`)
+      return { application: 'applied' }
+    },
+  })
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  const ledger = readLedger(tree.root)
+  const change = ledger.changes.find((item) => item.profile === 'prof-a' && item.kind === 'profile-bundles')
+  assert.ok(change !== undefined, '宿主链路的 bundles 写入必须差异记账')
+  assert.ok(!change.before.includes('fake-bundle'), 'before 是写入前快照')
+  assert.match(change.after, /fake-bundle/, 'after 是写入后快照')
+  // 记账后按台账还原 → bundles 回到写入前。
+  const outcome = restoreFromLedger(tree.root)
+  assert.equal(outcome.reverted.length, 1)
+  const restored = JSON.parse(readFileSync(pkgFile, 'utf8'))
+  assert.ok(!restored.dsh.profile.bundles.includes('fake-bundle'), '停用还原必须回滚宿主链路写入')
+  tree.cleanup()
+})
+
+await test('POST /lifecycle-baseline-restore 需显式 confirm；确认后恢复基线', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const noConfirm = await callRoute(route.handler, 'POST', '/dsh-shared-tree/lifecycle-baseline-restore', {})
+  assert.equal(noConfirm.status, 400)
+  assert.match(noConfirm.json.error, /confirm/)
+  const ok = await callRoute(route.handler, 'POST', '/dsh-shared-tree/lifecycle-baseline-restore', { confirm: true })
+  assert.equal(ok.json.ok, true)
+  assert.ok('reverted' in ok.json.value)
   tree.cleanup()
 })
 

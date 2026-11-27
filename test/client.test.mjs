@@ -266,7 +266,7 @@ await test('slots 注册抛错时不连累其他入口', () => {
 await test('写请求白名单：/set、/install、/rollback、/check-profiles、/set-profile', () => {
   const calls = [...SOURCE.matchAll(/postJson\(\s*('([^']+)'|`([^`]+)`)/g)].map((m) => m[2] ?? m[3])
   assert.ok(calls.length > 0, '客户端必须显式声明写请求路径')
-  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry', '/set-row'])
+  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry', '/set-row', '/lifecycle-baseline-restore'])
   for (const path of calls) {
     assert.ok(allowed.has(path), `不允许的写请求：${path}`)
   }

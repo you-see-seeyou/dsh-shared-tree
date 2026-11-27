@@ -15,7 +15,7 @@
  */
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { destroyTree, ensureTreeDir, lifecycleStatus, restoreFromLedger } from '../lib/lifecycle.js'
+import { destroyTree, ensureTreeDir, lifecycleStatus, restoreBaseline, restoreFromLedger } from '../lib/lifecycle.js'
 
 const args = new Set(process.argv.slice(2))
 const home = process.env.DSH_HOME !== undefined && process.env.DSH_HOME.length > 0
@@ -32,6 +32,24 @@ if (!existsSync(join(root, '.dsh-shared-tree-lifecycle.json'))) {
   console.error(`没有找到生命周期台账：${join(root, '.dsh-shared-tree-lifecycle.json')}`)
   console.error('（该插件从未启用过，或台账已被删除——没有可还原的内容。）')
   process.exit(1)
+}
+
+if (args.has('--baseline')) {
+  const dryRun = args.has('--dry-run')
+  if (!dryRun && !args.has('--confirm')) {
+    console.log('基线还原预览（未落盘，加 --confirm 才真正执行；会把每个 profile 的 package.json/cordis.patch.yml')
+    console.log('恢复成启用时刻的快照原文，启用之后的所有配置变更——含手工改动——都会被回滚）：')
+    const preview = restoreBaseline(root, { dryRun: true })
+    for (const item of preview.reverted) console.log(`  ↩ ${item}`)
+    for (const item of preview.skipped) console.log(`  ⤼ ${item}`)
+    console.log(`共 ${preview.reverted.length} 个文件将恢复基线，${preview.skipped.length} 条跳过。`)
+    process.exit(0)
+  }
+  const outcome = restoreBaseline(root, { dryRun })
+  console.log(dryRun
+    ? `dry-run：将恢复 ${outcome.reverted.length} 个文件到基线，跳过 ${outcome.skipped.length} 条。`
+    : `基线还原完成：${outcome.reverted.length} 个文件已恢复（现状留 *.bak-shared-tree-baseline 备份），跳过 ${outcome.skipped.length} 条。明细见 .dsh-shared-tree-baseline-report.json。`)
+  process.exit(0)
 }
 
 if (args.has('--destroy')) {
