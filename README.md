@@ -52,21 +52,31 @@
 从不 readdir `profiles/node_modules`。所以共享树里放着的包、一旦没有进当前 profile 的清单
 （从未启用过 / 被停用摘掉了名字），面板就再也列不出它——它"消失"了。
 
-**修复**：把包登记为当前 profile 的 `dependencies[name] = "link:<树内绝对路径>"`。
+**默认行为（2026-11-27 起）**：共享树里处于**启用**状态的插件，默认自动登记进官方 Plugins
+面板，用户无需手动执行任何登记动作。触发点：
+- **启动补扫（存量）**：插件 apply 时异步扫一遍——当前 profile 已启用、但 `dependencies` 里
+  还没有 `link:` 入口的独立 bundle，自动补登记；
+- **启用/停用后（增量，对称）**：`/set` 与 `shared_tree enable/disable` 成功后自动登记；
+- **点行跳转（兜底）**：客户端点独立 bundle 行时 `ensurePanelVisible()` 仍会先确认/登记。
+
+登记机制与约束（沿用，不重做）：把包登记为当前 profile 的 `dependencies[name] = "link:<树内绝对路径>"`。
 - 只写 dependencies，**绝不写 `dsh.profile.bundles`**——包不会被加载，停用/隔离语义不变；
 - 面板因此能看到它（`installed: true / enabled: false`），可打开配置页、可在面板里自行启用；
-- 只改**指定的那一个 profile**，其他 profile 与共享树目录零改动；
-- 「组件」（entry id 已由树内另一个 bundle 声明，如 `dsh-mnemon-strategy-*`）一律拒登记
-  ——在面板里出现独立开关只会诱发 issue #470；
-- 用户自己写的同名依赖绝不覆盖、绝不删除（撤销只回退本插件写的那一条）；
+- 只改**当前 profile**，其他 profile 与共享树目录零改动；
+- 「组件」（entry id 已由树内另一个 bundle 声明，如 `dsh-mnemon-strategy-*`）与 client-only 包
+  一律跳过——在面板里出现独立开关只会诱发 issue #470；
+- 幂等：已是目标状态不重写文件；用户自己写的同名依赖绝不覆盖、绝不删除；
 - 改前备份 `package.json.bak-shared-tree`，写入面板台账 `.dsh-shared-tree-panel.json`，
   并记进生命周期台账（停用插件时随还原一起回滚）。
 
-入口：
+**撤销尊重**：`shared_tree action=panel target=<包名> expose=false`（或 `POST /panel`）撤销后，
+该包记进面板台账的 `revoked`，**启动补扫与启用/停用后的自动登记都不再碰它**，直到显式
+`expose=true` 重新登记（同时清除撤销标记）。
+
+手动入口（仍保留）：
 - 工具：`shared_tree action=panel`（无 target=只读报告；`target=a,b expose=true|false` 执行登记/撤销）。
 - HTTP：`GET/POST /dsh-shared-tree/panel`。
-- 界面：点独立 bundle 行跳转时自动执行（这是客户端唯一的写请求）；`disable` 停用后服务端自动补登记。
-- 需重启 DSH（或该 profile）后官方面板才会重新拉取清单。
+- **宿主清单在启动时读取：新登记的包需重启 DSH（或该 profile）后才能在官方面板看到。**
 
 面板底部还有一个**只读分区**，列出本 profile 以 `link:` 本地路径安装的插件
 （桌面实测 7 条，含 `dsh-shared-tree` 自己），标 `linked` 徽标与原始路径。
@@ -115,8 +125,9 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 npm test
 ```
 
-- `test/shared-tree.test.mjs` —— Host 侧 71 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
-  `safetyNote` + 只读保证 + 面板可见性登记/撤销/组件拒登记/生命周期联动）。
+- `test/shared-tree.test.mjs` —— Host 侧 80 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
+  `safetyNote` + 只读保证 + 面板可见性登记/撤销/组件拒登记/生命周期联动 +
+  **默认登记：启用后自动登记、幂等、不覆盖用户依赖、启动补扫存量、跳过组件、撤销尊重**）。
 - `test/client.test.mjs` —— 客户端契约 28 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
   竞态保护、类别过滤与工具同源、未知状态、可访问性、无硬编码配色、
   **精简契约：功能按钮与自建详情页不得复活、写请求白名单只剩 /panel**）。

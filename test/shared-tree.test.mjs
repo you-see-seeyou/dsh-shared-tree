@@ -1583,6 +1583,174 @@ await test('panel 组件识别：entry id 归属别的树内 bundle 时拒绝登
   tree.cleanup()
 })
 
+// ── 默认登记（2026-11-27）：启用中的包自动进官方面板，无需手动登记 ──
+
+await test('默认登记：/set 启用成功后自动登记，与停用补登记对称', async () => {
+  const { tree, profileDir } = fakeProfileTree({ name: 'prof-panel', private: true, dsh: { profile: { bundles: [] } } })
+  const manager = managerForProfile(profileDir)
+  manager.setBundleEnabled = async (packageName, enabled) => {
+    const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+    manifest.dsh.profile.bundles = enabled ? [packageName] : []
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest, null, 2))
+    return { application: 'restart-required', nextStep: 'restart DSH' }
+  }
+  const { route } = ctxWithRoutes(tree, manager)
+  const enabled = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  assert.equal(enabled.json.value.results[0].ok, true)
+  assert.equal(enabled.json.value.results[0].panelPinned, true, '启用成功后必须默认登记（与停用对称）')
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.ok(manifest.dependencies['fake-bundle'], 'dependencies 里必须有 link: 入口')
+  assert.deepEqual(manifest.dsh.profile.bundles, ['fake-bundle'], 'bundles 只由 setBundleEnabled 写，登记不碰它')
+  assert.ok(existsSync(join(profileDir, 'package.json.bak-shared-tree')), '改前必须备份')
+  tree.cleanup()
+})
+
+await test('默认登记幂等：重复启用不重复写文件', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const manager = managerForProfile(profileDir)
+  manager.setBundleEnabled = async () => ({ application: 'applied' })
+  const { route } = ctxWithRoutes(tree, manager)
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  const first = readFileSync(join(profileDir, 'package.json'), 'utf8')
+  const again = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  assert.equal(again.json.value.results[0].panelPinned, false, '幂等命中不重复写文件，panelPinned 报 false')
+  assert.equal(readFileSync(join(profileDir, 'package.json'), 'utf8'), first, '第二次不得重写文件')
+  tree.cleanup()
+})
+
+await test('默认登记不覆盖用户已有依赖', async () => {
+  const tree = fakeTree()
+  const profileDir = join(dirname(tree.root), 'prof-user2')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'prof-user2', private: true, dependencies: { 'fake-bundle': '^1.0.0' },
+  }, null, 2))
+  const manager = managerForProfile(profileDir)
+  manager.setBundleEnabled = async () => ({ application: 'applied' })
+  const { route } = ctxWithRoutes(tree, manager)
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies['fake-bundle'], '^1.0.0', '用户自己的依赖必须原样保留')
+  tree.cleanup()
+})
+
+await test('工具 enable 默认登记：输出提示且写入 link: 依赖', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const manager = managerForProfile(profileDir)
+  manager.setBundleEnabled = async () => ({ application: 'restart-required', nextStep: 'restart DSH' })
+  const ctx = fakeContext({ pluginManager: manager })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const tool = ctx.toolsMap.get('shared_tree')
+  const out = await tool.execute({ action: 'enable', target: 'fake-bundle' }, {})
+  assert.match(out, /已默认登记进官方插件面板/)
+  assert.match(out, /重启 DSH 后面板可见/)
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.ok(manifest.dependencies['fake-bundle'], '工具启用也必须默认登记')
+  tree.cleanup()
+})
+
+await test('启动补扫：已启用但面板不可见的存量包自动登记；未启用的不碰', async () => {
+  const { tree, profileDir } = fakeProfileTree({ name: 'prof-panel', private: true, dsh: { profile: { bundles: ['fake-bundle'] } } })
+  const ctx = fakeContext({ pluginManager: {
+    profile: { dir: profileDir },
+    listBundles: async () => [{ name: 'fake-bundle', enabled: true }, { name: 'fake-client', enabled: false }],
+  } })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  // 启动补扫是异步的：等一个宏任务让它跑完。
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.ok(manifest.dependencies?.['fake-bundle'], '已启用的存量包必须被补登记')
+  assert.equal(manifest.dependencies?.['fake-client'], undefined, '未启用的包不登记')
+  assert.deepEqual(manifest.dsh.profile.bundles, ['fake-bundle'], 'bundles 不被补扫改动')
+  tree.cleanup()
+})
+
+await test('启动补扫幂等：第二次 apply 不重复写', async () => {
+  const { tree, profileDir } = fakeProfileTree({ name: 'prof-panel', private: true, dsh: { profile: { bundles: ['fake-bundle'] } } })
+  const manager = { profile: { dir: profileDir }, listBundles: async () => [{ name: 'fake-bundle', enabled: true }] }
+  const ctx = fakeContext({ pluginManager: manager })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const first = readFileSync(join(profileDir, 'package.json'), 'utf8')
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(readFileSync(join(profileDir, 'package.json'), 'utf8'), first, '重复启动不得重写文件')
+  tree.cleanup()
+})
+
+await test('启动补扫跳过组件：entry id 归属别的树内 bundle 时不登记', async () => {
+  const tree = fakeTree()
+  mkdirSync(join(tree.root, 'owner-bundle'), { recursive: true })
+  writeFileSync(join(tree.root, 'owner-bundle', 'package.json'), JSON.stringify({
+    name: 'owner-bundle', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2))
+  writeFileSync(join(tree.root, 'owner-bundle', 'cordis.patch.yml'), '- insert:\n    - id: owner-shared-row\n      name: owner-bundle\n')
+  mkdirSync(join(tree.root, 'owner-component'), { recursive: true })
+  writeFileSync(join(tree.root, 'owner-component', 'package.json'), JSON.stringify({
+    name: 'owner-component', version: '2.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2))
+  writeFileSync(join(tree.root, 'owner-component', 'cordis.patch.yml'), '- insert:\n    - id: owner-shared-row\n      name: owner-component\n')
+  const profileDir = join(dirname(tree.root), 'prof-cmp2')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'prof-cmp2', private: true, dsh: { profile: { bundles: ['owner-bundle', 'owner-component'] } },
+  }, null, 2))
+  const ctx = fakeContext({ pluginManager: {
+    profile: { dir: profileDir },
+    listBundles: async () => [{ name: 'owner-bundle', enabled: true }, { name: 'owner-component', enabled: true }],
+  } })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.ok(manifest.dependencies?.['owner-bundle'], '归属包正常登记')
+  assert.equal(manifest.dependencies?.['owner-component'], undefined, '组件即使已启用也不得登记（issue #470）')
+  tree.cleanup()
+})
+
+await test('撤销尊重：expose=false 撤销后，启动补扫与启用动作都不再自动登记它', async () => {
+  const { tree, profileDir } = fakeProfileTree({ name: 'prof-panel', private: true, dsh: { profile: { bundles: ['fake-bundle'] } } })
+  const manager = managerForProfile(profileDir)
+  manager.listBundles = async () => [{ name: 'fake-bundle', enabled: true }]
+  manager.setBundleEnabled = async () => ({ application: 'applied' })
+  const { route } = ctxWithRoutes(tree, manager)
+  // 先登记，再显式撤销。
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  const revoked = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: false })
+  assert.deepEqual(revoked.json.value.changed, ['fake-bundle'])
+  // 撤销后再启用：不得自动重新登记。
+  const enabled = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  assert.equal(enabled.json.value.results[0].ok, true)
+  assert.equal(enabled.json.value.results[0].panelPinned, false, '已被显式撤销的包，启用动作不得重新登记')
+  let manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies?.['fake-bundle'], undefined, '显式撤销后启用动作不得重新登记')
+  // 启动补扫也不得重新登记。
+  const ctx = fakeContext({ pluginManager: manager })
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies?.['fake-bundle'], undefined, '显式撤销后启动补扫不得重新登记')
+  // 显式 expose=true 可以重新登记（并清除撤销标记）。
+  const reexposed = await callRoute(route.handler, 'POST', '/dsh-shared-tree/panel', { target: 'fake-bundle', exposed: true })
+  assert.deepEqual(reexposed.json.value.changed, ['fake-bundle'])
+  const ledger = JSON.parse(readFileSync(join(tree.root, '.dsh-shared-tree-panel.json'), 'utf8'))
+  assert.equal(ledger.profiles['prof-panel'].revoked?.['fake-bundle'], undefined, '重新登记后撤销标记必须清除')
+  tree.cleanup()
+})
+
+await test('默认登记记入生命周期台账：停用插件时随还原回滚', async () => {
+  const { tree, profileDir } = fakeProfileTree()
+  const manager = managerForProfile(profileDir)
+  manager.setBundleEnabled = async () => ({ application: 'applied' })
+  const { route } = ctxWithRoutes(tree, manager)
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/set', { target: 'fake-bundle', enabled: true })
+  assert.ok(JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')).dependencies, '先确认已登记')
+  const restore = restoreFromLedger(tree.root)
+  assert.ok(restore.reverted.length > 0, '默认登记必须记入台账')
+  const after = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(after.dependencies, undefined, '停用插件后默认登记必须被回滚')
+  tree.cleanup()
+})
+
 console.log('')
 console.log(`${passed} 通过，${failed} 失败`)
 if (failed > 0) process.exitCode = 1

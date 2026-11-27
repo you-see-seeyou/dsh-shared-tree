@@ -125,7 +125,8 @@ shared_tree action=disable target=dsh-taskboard
 一致性是**结构保证**的，不靠约定：
 
 - `/status` 与工具的 `status` 用同一组函数（`scanTree` / `withProfileState` / `junctionFacts` / `readTreeManifest` / `standaloneConflictOf`）。
-- `/panel` 与工具的 `panel` 共用 `setPanelVisibility` / `panelReport`。
+- `/panel` 与工具的 `panel` 共用 `setPanelVisibility` / `panelReport`；默认登记（启动补扫/启用后）
+  共用 `autoPanelSync` / `autoPinOne`，底层仍是同一个 `setPanelVisibility`。
 
 界面内的搜索与过滤是**纯浏览器侧**数组过滤，不发任何写请求。
 客户端唯一的写请求是 `/panel`（点独立 bundle 行跳转前登记面板可见性）；
@@ -144,6 +145,25 @@ shared_tree action=disable target=dsh-taskboard
 「加入插件面板」按钮、升级确认弹窗与任务进度卡、「校验」按钮、生命周期「恢复到基线」按钮。
 **服务端路由与工具 action 全部保留**（`/set`、`/rows`、`/set-row`、`/detail`、`/install`、
 `/rollback`、`/verify`、`/lifecycle-baseline-restore` 等仍可经工具或 HTTP 使用），只是客户端不再调用。
+
+### 默认登记进官方面板（2026-11-27）
+
+共享树里**已启用**的独立 bundle 默认自动登记为当前 profile 的 `link:` 依赖，无需手动操作：
+
+| 触发点 | 函数 | 范围 |
+|---|---|---|
+| 启动补扫（存量） | `apply` 内异步调 `autoPanelSync` | 当前 profile 已启用、`dependencies` 里还没有 link: 入口的独立 bundle |
+| 启用/停用成功后（增量） | `/set` 与工具 enable/disable 调 `autoPinOne` | 刚操作的那个包（启用/停用对称） |
+| 点行跳转（兜底） | 客户端 `ensurePanelVisible` → `POST /panel` | 被点击的包 |
+
+约束（全部复用 `setPanelVisibility`）：只写 `dependencies`、绝不写 `dsh.profile.bundles`；
+幂等；不覆盖/不删除用户已有依赖；组件与 client-only 跳过；只改当前 profile；
+改前备份 + 面板台账 `.dsh-shared-tree-panel.json` + 生命周期台账。
+
+**撤销尊重**：`expose=false` 撤销过的包记进面板台账 `revoked`，`autoPanelSync` / `autoPinOne`
+都跳过它；显式 `expose=true` 重新登记时清除标记。
+
+**宿主清单在启动时读取**：新登记的包需重启 DSH（或该 profile）后才能在官方面板看到。
 
 ### 容错
 
