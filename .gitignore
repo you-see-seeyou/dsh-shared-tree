@@ -1,3 +1,6 @@
 node_modules/
 *.log
 _push/
+
+_ref-pm/
+tmp-*.log

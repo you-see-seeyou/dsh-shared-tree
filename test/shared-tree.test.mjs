@@ -8,9 +8,9 @@
  * 运行：node test/shared-tree.test.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { apply, inject, name } from '../lib/index.js'
 
 let passed = 0
@@ -855,14 +855,240 @@ await test('未知路径返回 404；坏 JSON 返回 500 且不崩', async () =>
   tree.cleanup()
 })
 
-await test('只读保证：GET 路由不写任何文件', async () => {
+await test('只读保证：GET 路由不写任何文件', () => {
+  return (async () => {
+    const tree = fakeTree()
+    const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+    const before = readFileSync(join(tree.root, 'fake-bundle', 'package.json'), 'utf8')
+    await callRoute(route.handler, 'GET', '/dsh-shared-tree/status')
+    await callRoute(route.handler, 'GET', '/dsh-shared-tree/verify')
+    const after = readFileSync(join(tree.root, 'fake-bundle', 'package.json'), 'utf8')
+    assert.equal(before, after)
+    tree.cleanup()
+  })()
+})
+
+// ── 升级 UI 的新路由 ────────────────────────────────────────────────────────
+
+/**
+ * 在假树旁边造一个引用了 fake-bundle 的假 profile。
+ * @param {any} tree 假树（root 的上一级即 profiles 目录）。
+ * @param {string} name profile 目录名。
+ * @param {string[]} bundles dsh.profile.bundles。
+ */
+function fakeProfile(tree, name, bundles) {
+  const dir = join(dirname(tree.root), name)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({
+    name, version: '1.0.0', dsh: { profile: { bundles } },
+  }, null, 2))
+  return dir
+}
+
+await test('GET /impact 缺 pkg 时返回 400', async () => {
   const tree = fakeTree()
   const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
-  const before = readFileSync(join(tree.root, 'fake-bundle', 'package.json'), 'utf8')
-  await callRoute(route.handler, 'GET', '/dsh-shared-tree/status')
-  await callRoute(route.handler, 'GET', '/dsh-shared-tree/verify')
-  const after = readFileSync(join(tree.root, 'fake-bundle', 'package.json'), 'utf8')
-  assert.equal(before, after)
+  const { status, json } = await callRoute(route.handler, 'GET', '/dsh-shared-tree/impact')
+  assert.equal(status, 400)
+  assert.match(json.error, /pkg is required/)
+  tree.cleanup()
+})
+
+await test('GET /impact 报告引用 profile、解析版本与升级历史', async () => {
+  const tree = fakeTree()
+  const profileDir = fakeProfile(tree, 'prof-a', ['fake-bundle'])
+  fakeProfile(tree, 'prof-b', ['fake-client'])
+  // 预写一条历史（回滚下拉的数据源）。
+  writeFileSync(join(tree.root, '.dsh-shared-tree-history.json'), JSON.stringify({
+    scheme: 'dsh-shared-tree-history/1',
+    packages: [{ name: 'fake-bundle', from: '1.2.2', to: '1.2.3', kind: 'upgrade', at: '2026-11-27T00:00:00.000Z', archivedPath: null }],
+  }, null, 2))
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const { status, json } = await callRoute(route.handler, 'GET', `/dsh-shared-tree/impact?pkg=${encodeURIComponent('fake-bundle')}`)
+  assert.equal(status, 200)
+  assert.equal(json.value.treeVersion, '1.2.3')
+  assert.equal(json.value.referencing, 1)
+  const row = json.value.profiles.find((item) => item.profile === 'prof-a')
+  assert.equal(row.referenced, true)
+  assert.equal(row.enabled, true)
+  assert.equal(row.version, '1.2.3', '本地没有 node_modules 时解析到共享树版本')
+  assert.equal(row.via, 'shared-tree')
+  assert.deepEqual(json.value.history.map((item) => item.version), ['1.2.3'])
+  assert.equal(json.value.profiles.find((item) => item.profile === 'prof-b').referenced, false)
+  assert.ok(existsSync(profileDir))
+  tree.cleanup()
+})
+
+await test('GET /deps 缺 pkg 或版本非法时返回 400（不触网）', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const missing = await callRoute(route.handler, 'GET', '/dsh-shared-tree/deps')
+  assert.equal(missing.status, 400)
+  const bad = await callRoute(route.handler, 'GET', `/dsh-shared-tree/deps?pkg=${encodeURIComponent('fake-bundle')}&ver=bad;name`)
+  assert.equal(bad.status, 400)
+  assert.match(bad.json.error, /invalid/)
+  tree.cleanup()
+})
+
+await test('POST /install 校验入参；GET /install/progress 空闲时返回 state=idle', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const noPkgs = await callRoute(route.handler, 'POST', '/dsh-shared-tree/install', {})
+  assert.equal(noPkgs.status, 400)
+  assert.match(noPkgs.json.error, /packages is required/)
+  const badSpec = await callRoute(route.handler, 'POST', '/dsh-shared-tree/install', { packages: ['x; rm -rf /'] })
+  assert.equal(badSpec.status, 400)
+  assert.match(badSpec.json.error, /包名不合法/)
+  const progress = await callRoute(route.handler, 'GET', '/dsh-shared-tree/install/progress')
+  assert.equal(progress.status, 200)
+  assert.equal(progress.json.value.state, 'idle')
+  tree.cleanup()
+})
+
+await test('POST /install 对非法包名不启动任务', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  await callRoute(route.handler, 'POST', '/dsh-shared-tree/install', { packages: ['bad name'] })
+  const progress = await callRoute(route.handler, 'GET', '/dsh-shared-tree/install/progress')
+  assert.equal(progress.json.value.state, 'idle', '校验失败时不得留下任务')
+  tree.cleanup()
+})
+
+await test('POST /rollback 校验入参：版本形态不合法时 400', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const missing = await callRoute(route.handler, 'POST', '/dsh-shared-tree/rollback', { name: 'fake-bundle' })
+  assert.equal(missing.status, 400)
+  const bad = await callRoute(route.handler, 'POST', '/dsh-shared-tree/rollback', { name: 'fake-bundle', version: '1.x; rm' })
+  assert.equal(bad.status, 400)
+  assert.match(bad.json.error, /invalid/)
+  tree.cleanup()
+})
+
+await test('POST /check-profiles 返回逐 profile 验证行', async () => {
+  const tree = fakeTree()
+  fakeProfile(tree, 'prof-a', ['fake-bundle'])
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const { status, json } = await callRoute(route.handler, 'POST', '/dsh-shared-tree/check-profiles', { name: 'fake-bundle' })
+  assert.equal(status, 200)
+  assert.equal(json.value.treeVersion, '1.2.3')
+  assert.equal(json.value.rows.length, 1)
+  assert.equal(json.value.rows[0].profile, 'prof-a')
+  assert.equal(json.value.rows[0].matchesTree, true)
+  assert.equal(json.value.rows[0].enabled, true)
+  tree.cleanup()
+})
+
+await test('POST /set-profile 修改目标 profile 的 bundles 并留备份', async () => {  const tree = fakeTree()
+  const dir = fakeProfile(tree, 'prof-a', ['fake-client'])
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const on = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-profile', { profile: 'prof-a', target: 'fake-bundle', enabled: true })
+  assert.equal(on.status, 200)
+  assert.equal(on.json.ok, true)
+  const written = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  assert.ok(written.dsh.profile.bundles.includes('fake-bundle'), '必须写进 dsh.profile.bundles')
+  assert.match(on.json.value.note, /重启/)
+  assert.ok(existsSync(join(dir, 'package.json.bak-shared-tree')), '改前必须留备份')
+  const off = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-profile', { profile: 'prof-a', target: 'fake-bundle', enabled: false })
+  const after = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  assert.ok(!after.dsh.profile.bundles.includes('fake-bundle'), '移除后不得残留')
+  const unknown = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-profile', { profile: 'no-such', target: 'fake-bundle', enabled: true })
+  assert.equal(unknown.json.ok, false)
+  assert.match(unknown.json.error, /不存在/)
+  tree.cleanup()
+})
+
+// ── 逐插件详情/调试 ────────────────────────────────────────────────────────
+
+await test('GET /entries 解析包补丁的 insert 条目；无 bundle 补丁的包返回 error 字段', async () => {
+  const tree = fakeTree()
+  writeFileSync(join(tree.root, 'fake-bundle', 'cordis.patch.yml'), [
+    '# 注释行要跳过',
+    '- insert:',
+    '    - id: fake-main',
+    '      name: fake-bundle',
+    '    - id: fake-widget',
+    '      name: fake-widget',
+    '      disabled: true',
+    '      config:',
+    '        mode: fast',
+    '        retries: 3',
+  ].join('\n'))
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const { status, json } = await callRoute(route.handler, 'GET', `/dsh-shared-tree/entries?pkg=${encodeURIComponent('fake-bundle')}`)
+  assert.equal(status, 200)
+  assert.equal(json.ok, true)
+  assert.equal(json.value.version, '1.2.3')
+  assert.deepEqual(json.value.entries.map((item) => item.id), ['fake-main', 'fake-widget'])
+  const widget = json.value.entries[1]
+  assert.equal(widget.disabled, true, '块式 disabled:true 必须被识别')
+  assert.deepEqual(widget.configKeys.sort(), ['mode', 'retries'], 'config 子块的键要收集为配置键')
+  assert.ok(json.value.patchText.includes('fake-widget'), '补丁原文必须回传')
+  const noPatch = await callRoute(route.handler, 'GET', `/dsh-shared-tree/entries?pkg=${encodeURIComponent('fake-client')}`)
+  assert.equal(noPatch.json.ok, true)
+  assert.ok(noPatch.json.value.error !== undefined, '只有 dsh.client 的包要给出可读的 error 字段')
+  const missing = await callRoute(route.handler, 'GET', `/dsh-shared-tree/entries?pkg=${encodeURIComponent('no-such')}`)
+  assert.equal(missing.json.ok, false)
+  tree.cleanup()
+})
+
+await test('POST /set-entry 禁用/启用/参数走 profile 覆盖层并留备份', async () => {
+  const tree = fakeTree()
+  const dir = join(dirname(tree.root), 'prof-a')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'prof-a' }, null, 2))
+  writeFileSync(join(dir, 'cordis.patch.yml'), '# 用户已有覆盖层\n- { id: some-other, disabled: true }\n')
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+
+  const disable = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-entry', { profile: 'prof-a', entryId: 'fake-main', disabled: true })
+  assert.equal(disable.json.ok, true)
+  let text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+  assert.match(text, /- id: fake-main/, '禁用必须追加覆盖块')
+  assert.match(text, /\n  disabled: true/, '覆盖块里要有 disabled: true')
+  assert.match(text, /some-other/, '已有覆盖条目不得被破坏')
+  assert.ok(existsSync(join(dir, 'cordis.patch.yml.bak-shared-tree')), '改前必须留备份')
+
+  const config = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-entry', { profile: 'prof-a', entryId: 'fake-main', config: { mode: 'fast' } })
+  assert.equal(config.json.ok, true)
+  text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+  assert.match(text, /config: \{"mode":"fast"\}/, '参数必须以合法 YAML flow 形式落盘')
+  // 幂等重建：同一 entry 只有一个块。
+  assert.equal(text.split('- id: fake-main').length - 1, 1, '重复调整不得产生重复块')
+
+  const enable = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-entry', { profile: 'prof-a', entryId: 'fake-main', disabled: false })
+  assert.equal(enable.json.ok, true)
+  text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+  assert.ok(!text.includes('fake-main'), '启用 = 删除覆盖块，让 bundle 自己的补丁生效')
+  assert.match(text, /some-other/, '已有覆盖条目仍不得被破坏')
+
+  const unknownProfile = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-entry', { profile: 'no-such', entryId: 'fake-main', disabled: true })
+  assert.equal(unknownProfile.json.ok, false)
+  const badId = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-entry', { profile: 'prof-a', entryId: 'bad id!', disabled: true })
+  assert.equal(badId.json.ok, false)
+  assert.match(badId.json.error, /不合法/)
+  const missing = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-entry', {})
+  assert.equal(missing.status, 400)
+  tree.cleanup()
+})
+
+await test('GET /debug 汇总加载状态、哈希一致性与引用面', async () => {
+  const tree = fakeTree()
+  fakeProfile(tree, 'prof-a', ['fake-bundle'])
+  const { route } = ctxWithRoutes(tree, {
+    listBundles: async () => ([{ name: 'fake-bundle', enabled: true, availability: 'profile', version: '1.2.3', rows: [{}, {}] }]),
+  })
+  const { status, json } = await callRoute(route.handler, 'GET', `/dsh-shared-tree/debug?pkg=${encodeURIComponent('fake-bundle')}`)
+  assert.equal(status, 200)
+  assert.equal(json.value.version, '1.2.3')
+  assert.equal(json.value.kind, 'bundle')
+  assert.deepEqual(json.value.dshKeys, ['bundle'])
+  assert.equal(json.value.inCurrentProfile.known, true)
+  assert.equal(json.value.inCurrentProfile.enabled, true)
+  assert.equal(json.value.inCurrentProfile.rows, 2)
+  assert.equal(json.value.hashOk, null, '没有清单记录时哈希按未知处理')
+  assert.deepEqual(json.value.referenced, ['prof-a'])
+  const missing = await callRoute(route.handler, 'GET', `/dsh-shared-tree/debug?pkg=${encodeURIComponent('no-such')}`)
+  assert.equal(missing.json.ok, false)
   tree.cleanup()
 })
 

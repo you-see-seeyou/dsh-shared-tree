@@ -263,14 +263,16 @@ await test('slots 注册抛错时不连累其他入口', () => {
   assert.ok(names.includes('sidebar.panellist'), '第一处失败后第二处仍应注册')
 })
 
-await test('只读：客户端只发 GET 与一个 POST /set，且没有 install 路径', () => {
-  const calls = [...SOURCE.matchAll(/(getJson|postJson)\(\s*'([^']+)'/g)].map((m) => [m[1], m[2]])
-  assert.ok(calls.length > 0)
-  for (const [fn, path] of calls) {
-    assert.ok(path.startsWith('/'), `路径必须以 / 开头：${path}`)
-    if (fn === 'postJson') assert.equal(path, '/set', '唯一的写请求只能是 /set')
+await test('写请求白名单：/set、/install、/rollback、/check-profiles、/set-profile', () => {
+  const calls = [...SOURCE.matchAll(/postJson\(\s*('([^']+)'|`([^`]+)`)/g)].map((m) => m[2] ?? m[3])
+  assert.ok(calls.length > 0, '客户端必须显式声明写请求路径')
+  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry'])
+  for (const path of calls) {
+    assert.ok(allowed.has(path), `不允许的写请求：${path}`)
   }
-  assert.ok(!/\/install/.test(SOURCE), '客户端不应触发 install（装包只走工具/CLI）')
+  // 升级必须走确认弹窗 + 总是覆盖（replace:true），且逐 profile 验证在升级任务完成后触发。
+  assert.ok(SOURCE.includes('replace: true'), 'install 请求必须显式 replace:true（覆盖升级）')
+  assert.ok(SOURCE.includes('/check-profiles'), '升级完成后必须调 /check-profiles 出验证结果卡')
 })
 
 await test('样式只用主题 token 或透明值，没有硬编码配色（图标除外）', () => {
@@ -411,10 +413,50 @@ await test('只读分区（客户端）：渲染 linked 列表且区块内没有
 
 await test('只读分区（客户端）：不参与四个计数，只影响自己的条数', () => {
   // 顶部计数仍用 counts.total / counts.enabled；linked 只用于分区标题与说明
-  const header = SOURCE.slice(SOURCE.indexOf("h('span', { style: styles.meta }"), SOURCE.indexOf("h('button'"))
+  const header = SOURCE.slice(
+    SOURCE.indexOf("h('span', { style: styles.meta }"),
+    SOURCE.indexOf("h('button'", SOURCE.indexOf("h('span', { style: styles.meta }")),
+  )
   assert.ok(/counts\.total/.test(header) && /counts\.enabled/.test(header), '顶部计数口径不变')
   assert.ok(!/counts\.linked/.test(header), '顶部计数不得把 linked 算进来')
   assert.ok(/counts\.linked/.test(SOURCE) || /linked\.length/.test(SOURCE), '分区标题用 linked 自身条数')
+})
+
+await test('升级流程契约：确认弹窗、精确版本锁定、四阶段进度、依赖不满足置灰', () => {
+  // 确认弹窗：固定精确版本 + 影响面列表 + 开始/取消。
+  assert.ok(SOURCE.includes('ConfirmModal'), '必须有确认弹窗组件')
+  assert.ok(SOURCE.includes('affectedProfiles'), '弹窗必须展示"影响 N 个 profile"')
+  assert.ok(SOURCE.includes("useState(true)"), '精确版本锁定默认开启')
+  // 任务进度：prepare/build/merge/verify 四阶段 + 结束后逐 profile 验证结果卡。
+  assert.ok(SOURCE.includes("['prepare', 'build', 'merge', 'verify']"), '四阶段顺序必须固定')
+  assert.ok(SOURCE.includes('JobCard'), '必须有任务进度卡组件')
+  assert.ok(SOURCE.includes('/install/progress'), '进度必须轮询任务接口')
+  // 依赖区：deps.ok === false 时升级按钮禁用。
+  assert.ok(SOURCE.includes('upgradeBlocked'), '必须依赖检查结果决定升级按钮是否置灰')
+  // 详情页三区 + 行内按钮。
+  assert.ok(SOURCE.includes('DetailPanel'), '必须有详情页组件')
+  assert.ok(SOURCE.includes('/set-profile'), '灰度开关必须走跨 profile 接口')
+  assert.ok(SOURCE.includes('/rollback'), '回滚下拉必须走 /rollback')
+})
+
+await test('黑屏回归：DetailPanel 不得引用未定义的 load（渲染期 ReferenceError → 槽位整块空白）', () => {
+  const body = SOURCE.slice(SOURCE.indexOf('function DetailPanel'), SOURCE.indexOf('function ConfirmModal'))
+  assert.ok(!/\[name,\s*load\s*,/.test(body), 'DetailPanel 的 useCallback 依赖里不得出现未定义的 load')
+  assert.ok(/\[name,\s*loadDetail,\s*t\]/.test(body), '必须引用自己定义的 loadDetail')
+  // 每个取数失败都要有错误态兜底（不许白屏/黑屏）。
+  assert.ok(body.includes('entriesError'), '功能项加载失败要有错误态')
+  assert.ok(body.includes('debugError'), '调试信息加载失败要有错误态')
+})
+
+await test('详情/调试契约：功能项开关、profile 覆盖层、整行可点', () => {
+  assert.ok(SOURCE.includes('/entries?pkg='), '功能项必须走 /entries')
+  assert.ok(SOURCE.includes('/set-entry'), '功能项开关必须走 /set-entry（写 profile 覆盖层）')
+  assert.ok(SOURCE.includes('/debug?pkg='), '调试区必须走 /debug')
+  assert.ok(SOURCE.includes('targetProfile'), 'entry 调整必须显式选择目标 profile')
+  assert.ok(SOURCE.includes('wholeRowHint'), '整行可点要有提示文案')
+  // 整行可点：rowMain 的 onClick 直接进详情；行内按钮必须 stopPropagation 防误触。
+  assert.ok(/rowMain,\s*cursor:\s*'pointer'/.test(SOURCE), 'rowMain 必须 pointer + 可点')
+  assert.ok((SOURCE.match(/event\.stopPropagation\(\)/g) ?? []).length >= 3, '行内按钮都要 stopPropagation')
 })
 
 console.log('')
