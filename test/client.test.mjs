@@ -446,6 +446,30 @@ await test('黑屏回归：DetailPanel 不得引用未定义的 load（渲染期
   // 每个取数失败都要有错误态兜底（不许白屏/黑屏）。
   assert.ok(body.includes('entriesError'), '功能项加载失败要有错误态')
   assert.ok(body.includes('debugError'), '调试信息加载失败要有错误态')
+  // TDZ 回归（2026-11-27 实测：toggleRow 的依赖数组引用了滞后声明的 loadDetail →
+  // 渲染期求值触发 "Cannot access 'loadDetail' before initialization" → 整面板黑屏）。
+  // 规则：DetailPanel 段内每个 useCallback 依赖数组的成员，必须在其之前已声明（props 解构或 const）。
+  const props = ['name', 'treeVersion', 'onBack', 'onUpgrade', 'onJobStarted', 't', 'fill']
+  const declarations = [
+    ...[...body.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=/g)].map((match) => ({ name: match[1], at: match.index })),
+    // useState 的数组解构：const [a, setA] = useState(...)
+    ...[...body.matchAll(/const\s*\[([^\]]+)\]\s*=/g)].flatMap((match) =>
+      match[1].split(',').map((item) => item.trim()).filter((item) => /^[A-Za-z_$][\w$]*$/.test(item))
+        .map((name) => ({ name, at: match.index }))),
+  ]
+  for (const match of body.matchAll(/\},\s*\[([^\]]+)\]\)/g)) {
+    for (const dep of match[1].split(',').map((item) => item.trim()).filter((item) => item.length > 0)) {
+      const found = declarations.find((item) => item.name === dep)
+      assert.ok(
+        props.includes(dep) || (found !== undefined && found.at < match.index),
+        `依赖数组里的「${dep}」必须在其之前声明（TDZ 会黑屏），位置 ${match.index}`,
+      )
+    }
+  }
+  // toggleRow 必须在 loadDetail 声明之后（上一次黑屏的直接原因）。
+  const loadAt = body.indexOf('const loadDetail = useCallback')
+  const toggleAt = body.indexOf('const toggleRow = useCallback')
+  assert.ok(loadAt >= 0 && toggleAt > loadAt, 'loadDetail 必须先于 toggleRow 声明')
 })
 
 await test('详情/调试契约：功能项开关、profile 覆盖层、整行可点', () => {
