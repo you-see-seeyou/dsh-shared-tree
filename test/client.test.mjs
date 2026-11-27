@@ -496,7 +496,36 @@ await test('原版详情复刻契约：描述文档 + 行级功能开关（原�
   assert.ok(SOURCE.includes('rowsFilter'), '行多时要有过滤输入框（原版 partsFilter 行为）')
   assert.ok(SOURCE.includes('readOnlyReason'), '只读行要禁用并给原因（原版 RowSwitch locked 行为）')
   assert.ok(SOURCE.includes('docSection(),'), '描述区必须在详情页渲染')
-  assert.ok(SOURCE.includes('rowsSection(),'), '功能开关区必须在详情页渲染')
+  assert.ok(/rowsSection\(\)/.test(SOURCE), '功能开关区必须在详情页渲染')
+})
+
+await test('原版描述区 1:1 复刻契约：三态结构、原版 token、图片渲染', () => {
+  // 三态：骨架 / 滚动文档 / 失败重试（DetailDocument.module.css 逐项对齐）。
+  assert.ok(SOURCE.includes('docSkeleton'), 'loading 必须是骨架条三态之一')
+  assert.ok(SOURCE.includes('dst-skeleton'), '骨架动画 keyframes 必须存在（原版同款）')
+  assert.ok(SOURCE.includes("maxHeight: 'min(560px, 60vh)'"), '文档滚动区高度上限必须与原版一致')
+  assert.ok(SOURCE.includes("borderTop: '0.5px solid var(--dsw-alias-border-l1"), '文档区上下 0.5px 边框线（原版 border-block）')
+  assert.ok(SOURCE.includes("scrollbarGutter: 'stable'"), '滚动条 gutter 稳定（原版）')
+  assert.ok(SOURCE.includes('data-detail-document'), '保留原版 data 标记')
+  // token：字体/链接/行内代码/错误色全走原版 alias token。
+  assert.ok(SOURCE.includes('--dsw-font-markdown-h1'), '标题必须用原版 markdown 字体 token')
+  assert.ok(SOURCE.includes("--dsw-alias-markdown-inline-code"), '行内代码背景必须用原版 token')
+  assert.ok(SOURCE.includes('--dsw-alias-link'), '链接色必须用原版 token')
+  assert.ok(SOURCE.includes("--dsw-alias-bg-skeleton"), '骨架条背景必须用原版 token')
+  // 图片：![alt](src) 相对路径走 /detail-image，http(s) 直渲染。
+  assert.ok(SOURCE.includes('/detail-image?pkg='), '相对图片必须经宿主 detail-image 路由伺服')
+  assert.ok(SOURCE.includes('data:'), 'data: URI 图片直渲染')
+  assert.ok(SOURCE.includes('renderMarkdown(doc.markdown'), '描述区必须经渲染器输出')
+})
+
+await test('tab 式信息架构契约：四区块按钮切换、保挂载不重挂', () => {
+  assert.ok(SOURCE.includes("useState('doc')"), 'tab 状态必须存在且默认描述页')
+  assert.ok(SOURCE.includes("role: 'tablist'") && SOURCE.includes("role: 'tabpanel'"), 'tab/tabpanel 语义齐全')
+  assert.ok(SOURCE.includes('tabDoc') && SOURCE.includes('tabUpgrade') && SOURCE.includes('tabVersion') && SOURCE.includes('tabProfiles'), '四个 tab 文案齐全')
+  assert.ok(SOURCE.includes("paneStyle('doc')") && SOURCE.includes("paneStyle('upgrade')") && SOURCE.includes("paneStyle('version')") && SOURCE.includes("paneStyle('profiles')"), '四个区块都由 paneStyle 包裹')
+  // 保挂载：非激活 tab 用 display:none，不用条件渲染卸载（状态不丢、不重新请求）。
+  assert.ok(SOURCE.includes(": { display: 'none' }"), '非激活 tab 必须 display:none 保挂载')
+  assert.ok(!/tab === 'doc'\s*\?\s*docSection\(\)/.test(SOURCE), '不得条件渲染区块（会重挂丢状态）')
 })
 
 console.log('')

@@ -1117,8 +1117,35 @@ await test('GET /detail 优先宿主 readBundleDetail，缺服务时退回包内
   assert.match(readme.json.value.markdown, /README/)
   const none = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/detail?pkg=${encodeURIComponent('fake-client')}&lang=zh`)
   assert.equal(none.json.value.found, false, '没有任何文档时 found=false（界面显示缺失文案）')
+  assert.ok('docPath' in none.json.value, '必须回带 docPath（图片解析锚点）')
   const bad = await callRoute(route2.handler, 'GET', '/dsh-shared-tree/detail?pkg=')
   assert.equal(bad.status, 400)
+  tree2.cleanup()
+})
+
+await test('GET /detail-image 伺服包内图片；穿越与缺参被拒', async () => {
+  const tree = fakeTree()
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  mkdirSync(join(tree.root, 'fake-bundle', 'docs'), { recursive: true })
+  writeFileSync(join(tree.root, 'fake-bundle', 'docs', 'demo.png'), png)
+  writeFileSync(join(tree.root, 'fake-bundle', 'cover.png'), png)
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  // 文档子目录里的相对图片。
+  const hit = await callRoute(route.handler, 'GET', `/dsh-shared-tree/detail-image?pkg=${encodeURIComponent('fake-bundle')}&doc=${encodeURIComponent('README.md')}&rel=${encodeURIComponent('docs/demo.png')}`)
+  assert.equal(hit.status, 200)
+  assert.equal(hit.json, undefined, '图片字节直出，不是 JSON 响应')
+  tree.cleanup()
+
+  const tree2 = fakeTree()
+  writeFileSync(join(tree2.root, 'fake-bundle', 'cover.png'), png)
+  const { route: route2 } = ctxWithRoutes(tree2, { listBundles: async () => [] })
+  // callRoute 现有 stub 只收 JSON；这里直接断言 JSON 层行为，字节路径由上一段覆盖。
+  const missing = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/detail-image?pkg=${encodeURIComponent('fake-bundle')}&rel=${encodeURIComponent('nope.png')}`)
+  assert.equal(missing.status, 404)
+  const traversal = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/detail-image?pkg=${encodeURIComponent('fake-bundle')}&rel=${encodeURIComponent('..\\..\\..\\windows\\win.ini')}`)
+  assert.equal(traversal.status, 404, '路径穿越必须被拒（找不到即 404，绝不读包外文件）')
+  const noParams = await callRoute(route2.handler, 'GET', '/dsh-shared-tree/detail-image?pkg=fake-bundle')
+  assert.equal(noParams.status, 400)
   tree2.cleanup()
 })
 
