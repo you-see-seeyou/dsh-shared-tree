@@ -22,7 +22,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node test/shared-tree.test.mjs && node test/client.test.mjs"
+    "test": "node test/shared-tree.test.mjs && node test/client.test.mjs && node test/lifecycle.test.mjs"
   },
   "keywords": [
     "dsh",

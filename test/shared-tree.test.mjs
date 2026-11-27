@@ -169,19 +169,23 @@ await test('插件注册 shared_tree 工具且参数完整', () => {
   assert.ok(tool !== undefined, '未注册 shared_tree')
   assert.equal(tool.parameters.type, 'object')
   assert.deepEqual(tool.parameters.required, ['action'])
-  assert.deepEqual(tool.parameters.properties.action.enum, ['status', 'search', 'enable', 'disable', 'install', 'verify'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['status', 'search', 'enable', 'disable', 'install', 'verify', 'lifecycle'])
   assert.equal(typeof tool.execute, 'function')
   assert.equal(typeof tool.output.render, 'function')
 })
 
 await test('action=status 在空目录上报告"尚未创建"而不是崩', async () => {
   const base = mkdtempSync(join(tmpdir(), 'shared-tree-empty-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = base // 基线快照落在临时目录，不碰真实主目录。
   const ctx = fakeContext()
   apply(ctx, { treeRoot: join(base, 'nothing-here') })
   const tool = ctx.toolsMap.get('shared_tree')
   const text = await tool.execute({ action: 'status' }, {})
-  assert.match(text, /存在：否/)
+  // 生命周期语义：apply（启用）会创建树目录并做基线快照——所以这里是"空树"而非"不存在"。
   assert.match(text, /顶层包：0 个/)
+  if (previousHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousHome
   rmSync(base, { recursive: true, force: true })
 })
 
@@ -381,10 +385,17 @@ await test('参数校验：缺 action 报错', async () => {
 await test('真实共享树只读体检（不存在的树也不崩）', async () => {
   const ctx = fakeContext()
   // 指向一个肯定不存在的路径，确保 CI/其他机器可跑。
-  apply(ctx, { treeRoot: join(tmpdir(), 'dsh-shared-tree-does-not-exist-xyz') })
+  // 生命周期语义：apply 会创建该目录（启用=建树），之后 status 报告空树。
+  const base = mkdtempSync(join(tmpdir(), 'shared-tree-real-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = base
+  apply(ctx, { treeRoot: join(base, 'nothing-here') })
   const tool = ctx.toolsMap.get('shared_tree')
   const text = await tool.execute({ action: 'status' }, {})
-  assert.match(text, /存在：否/)
+  assert.match(text, /顶层包：0 个/)
+  if (previousHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousHome
+  rmSync(base, { recursive: true, force: true })
 })
 
 // ── 侧边栏用的 HTTP 数据通道 ────────────────────────────────────────────────
@@ -1089,6 +1100,59 @@ await test('GET /debug 汇总加载状态、哈希一致性与引用面', async 
   assert.deepEqual(json.value.referenced, ['prof-a'])
   const missing = await callRoute(route.handler, 'GET', `/dsh-shared-tree/debug?pkg=${encodeURIComponent('no-such')}`)
   assert.equal(missing.json.ok, false)
+  tree.cleanup()
+})
+
+// ── 生命周期路由 ────────────────────────────────────────────────────────────
+
+await test('GET /lifecycle 返回状态；restore/destroy 无确认被拒', async () => {
+  const tree = fakeTree()
+  const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })
+  const status = await callRoute(route.handler, 'GET', '/dsh-shared-tree/lifecycle')
+  assert.equal(status.json.ok, true)
+  assert.equal(status.json.value.initialized, true, 'apply 已在挂载时做过基线快照')
+  assert.ok(Array.isArray(status.json.value.profiles))
+  const noConfirm = await callRoute(route.handler, 'POST', '/dsh-shared-tree/lifecycle-restore', {})
+  assert.equal(noConfirm.status, 400)
+  const noDestroy = await callRoute(route.handler, 'POST', '/dsh-shared-tree/lifecycle-destroy', { confirm: 'yes' })
+  assert.equal(noDestroy.status, 400)
+  assert.match(noDestroy.json.error, /DESTROY/)
+  tree.cleanup()
+})
+
+await test('apply 通过 ctx.effect 注册停用还原；fake ctx 的 disposer 被收集', async () => {
+  const tree = fakeTree()
+  const webServer = fakeWebServer()
+  const effects = []
+  const ctx = fakeContext({ webServer })
+  ctx.effect = (callback, label) => { effects.push({ callback, label }); return () => {} }
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const entry = effects.find((item) => item.label === 'dsh-shared-tree: lifecycle restore')
+  assert.ok(entry !== undefined, '必须注册 lifecycle restore 的 effect')
+  // 手动触发 dispose：还原跑在假树上不炸（台账无变更 → 空还原）。
+  assert.doesNotReject(() => entry.callback())
+  // 没有 ctx.effect 的宿主（异常环境）也不得崩。
+  const plain = fakeContext()
+  assert.doesNotThrow(() => apply(plain, { treeRoot: tree.root, buildDir: tree.buildDir }))
+  tree.cleanup()
+})
+
+await test('工具 action=lifecycle：status / restore 需确认 / destroy 预览', async () => {
+  const tree = fakeTree()
+  const ctx = fakeContext()
+  apply(ctx, { treeRoot: tree.root, buildDir: tree.buildDir })
+  const tool = ctx.toolsMap.get('shared_tree')
+  const status = await tool.execute({ action: 'lifecycle', mode: 'status' }, {})
+  assert.match(status, /生命周期：已初始化/)
+  assert.match(status, /台账变更：0 条/)
+  const noConfirm = await tool.execute({ action: 'lifecycle', mode: 'restore' }, {})
+  assert.match(noConfirm, /confirm=true/)
+  const dry = await tool.execute({ action: 'lifecycle', mode: 'restore-dry-run' }, {})
+  assert.match(dry, /预览/)
+  const destroyDry = await tool.execute({ action: 'lifecycle', mode: 'destroy-dry-run' }, {})
+  assert.match(destroyDry, /保留/)
+  const destroyNo = await tool.execute({ action: 'lifecycle', mode: 'destroy' }, {})
+  assert.match(destroyNo, /confirm=true/)
   tree.cleanup()
 })
 
