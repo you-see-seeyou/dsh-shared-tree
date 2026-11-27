@@ -528,6 +528,22 @@ await test('tab 式信息架构契约：四区块按钮切换、保挂载不重�
   assert.ok(!/tab === 'doc'\s*\?\s*docSection\(\)/.test(SOURCE), '不得条件渲染区块（会重挂丢状态）')
 })
 
+await test('生命周期状态条契约：状态必须在 SharedTreePanel 作用域内声明（黑屏回归）', () => {
+  // 2026-11-27 实测：lifecycle 的 useState 被误插进 DetailPanel，而渲染条在 SharedTreePanel
+  // → 渲染期 ReferenceError: lifecycle is not defined → 整面板黑屏 retire。
+  const panelStart = SOURCE.indexOf('function SharedTreePanel')
+  const panelBody = SOURCE.slice(panelStart)
+  const stateAt = panelBody.indexOf('const [lifecycle, setLifecycle] = useState(null)')
+  assert.ok(stateAt > 0, 'lifecycle 状态必须声明在 SharedTreePanel 内')
+  const renderAt = panelBody.indexOf('lifecycle !== null')
+  assert.ok(renderAt > stateAt, '渲染必须在状态声明之后')
+  const detailBody = SOURCE.slice(SOURCE.indexOf('function DetailPanel'), SOURCE.indexOf('function ConfirmModal'))
+  assert.equal(detailBody.indexOf('const [lifecycle'), -1, 'DetailPanel 不得声明 lifecycle 状态（作用域错位=黑屏根源）')
+  // 状态条数据来自 /lifecycle。
+  assert.ok(SOURCE.includes("getJson('/lifecycle')"), '总览页必须拉取 /lifecycle')
+  assert.ok(SOURCE.includes('data-lifecycle'), '状态条必须带 data 标记')
+})
+
 console.log('')
 console.log(`${passed} 通过，${failed} 失败`)
 if (failed > 0) process.exitCode = 1
