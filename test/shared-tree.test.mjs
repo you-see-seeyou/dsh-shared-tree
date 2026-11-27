@@ -1148,6 +1148,38 @@ await test('POST /lifecycle-baseline-restore 需显式 confirm；确认后恢复
 
 // ── 生命周期路由 ────────────────────────────────────────────────────────────
 
+await test('GET /rows join listBundles 的行级 meta（title/description 按 lang 解析）', async () => {
+  const tree = fakeTree()
+  writeFileSync(join(tree.root, 'fake-bundle', 'cordis.patch.yml'), '- insert:\n    - id: fake-main\n')
+  const { route } = ctxWithRoutes(tree, {
+    listBundles: async () => ([
+      {
+        name: 'fake-bundle',
+        rows: [
+          { rowId: 'fake-main', moduleName: 'fake-bundle', meta: { title: { en: 'Main switch', zh: '主开关' }, description: { en: 'Toggles the core.', zh: '控制核心功能。' } } },
+        ],
+      },
+    ]),
+    listPlugins: async () => ([
+      { entryId: 'fake-main', rowId: 'fake-main', moduleName: 'fake-bundle', enabled: true, phase: null, readOnlyReason: null },
+    ]),
+  })
+  const zh = await callRoute(route.handler, 'GET', `/dsh-shared-tree/rows?pkg=${encodeURIComponent('fake-bundle')}&lang=zh`)
+  assert.equal(zh.json.value.rows[0].title, '主开关', 'zh 必须解析中文文案（原版 PluginLocalizedMeta 同字段）')
+  assert.equal(zh.json.value.rows[0].description, '控制核心功能。')
+  const en = await callRoute(route.handler, 'GET', `/dsh-shared-tree/rows?pkg=${encodeURIComponent('fake-bundle')}&lang=en`)
+  assert.equal(en.json.value.rows[0].title, 'Main switch', 'en 必须解析英文文案')
+  // meta 缺失的行：title/description 为 null，开关与状态不受影响。
+  const { route: route2 } = ctxWithRoutes(tree, {
+    listBundles: async () => ([{ name: 'fake-bundle', rows: [] }]),
+    listPlugins: async () => ([{ entryId: 'fake-main', moduleName: 'fake-bundle', enabled: false, phase: null, readOnlyReason: null }]),
+  })
+  const bare = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/rows?pkg=${encodeURIComponent('fake-bundle')}&lang=zh`)
+  assert.equal(bare.json.value.rows[0].title, null)
+  assert.equal(bare.json.value.rows[0].enabled, false)
+  tree.cleanup()
+})
+
 await test('GET /lifecycle 返回状态；restore/destroy 无确认被拒', async () => {
   const tree = fakeTree()
   const { route } = ctxWithRoutes(tree, { listBundles: async () => [] })

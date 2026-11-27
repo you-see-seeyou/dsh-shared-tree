@@ -544,6 +544,22 @@ await test('生命周期状态条契约：状态必须在 SharedTreePanel 作用
   assert.ok(SOURCE.includes('data-lifecycle'), '状态条必须带 data 标记')
 })
 
+await test('总览信息密度契约：条目展开功能开关 + 用途描述（侧边栏面板同款）', () => {
+  // 展开/收起按钮与行内块。
+  assert.ok(SOURCE.includes('rowsShow') && SOURCE.includes('rowsHide'), '必须有展开/收起按钮文案')
+  assert.ok(SOURCE.includes('data-overview-rows'), '总览展开块必须带 data 标记')
+  assert.ok(SOURCE.includes('rowsCache'), '展开数据必须有缓存（不重复请求）')
+  assert.ok(SOURCE.includes('overviewRowsBlock'), '总览行内功能块必须存在')
+  // 数据源：/rows 复用 + lang 参数（原版 PluginLocalizedMeta 同字段）。
+  assert.ok(SOURCE.includes("getJson(`/rows?pkg="), '总览功能行必须走 /rows（与详情页同一数据源）')
+  assert.ok(SOURCE.includes('&lang='), '行级 title/description 必须按语言解析')
+  // 行渲染：开关 + 用途描述 + 状态点。
+  assert.ok((SOURCE.match(/row\.description !== null && row\.description !== undefined/g) ?? []).length >= 2, '总览与详情都要渲染用途描述')
+  assert.ok(SOURCE.includes("row.title ?? row.entryId"), '行标题优先用原版 meta.title')
+  // 写入链路：总览行内开关必须走 /set-row（manager 原生链路 + 差异记账）。
+  assert.ok(SOURCE.includes("postJson('/set-row', { entryId, enabled })"), '总览行内开关必须走 /set-row')
+})
+
 console.log('')
 console.log(`${passed} 通过，${failed} 失败`)
 if (failed > 0) process.exitCode = 1
