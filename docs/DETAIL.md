@@ -59,7 +59,7 @@ shared_tree action=disable target=dsh-taskboard
 
 ## App 界面（侧边栏图标 / 主列面板 / 右栏 tab）
 
-这三处入口都渲染**同一个面板组件**（插件列表 + 搜索 + 过滤 + 逐个开关）：
+这三处入口都渲染**同一个只读目录面板**（插件列表 + 搜索 + 过滤 + 刷新）：
 
 | 入口 | 槽位 | 说明 |
 |---|---|---|
@@ -119,18 +119,31 @@ shared_tree action=disable target=dsh-taskboard
 | 路由 | 作用 |
 |---|---|
 | `GET /dsh-shared-tree/status` | 插件列表（含 `hasBundle` / `hasClient` / `kind` / `version` / `enabled` / `components`）+ `linked` 只读分区 + 计数 + junction 健康 + 清单摘要 |
-| `GET /dsh-shared-tree/verify` | 与 `shared_tree action=verify` **同源**的结构化结果（行、计数、是否健康） |
-| `POST /dsh-shared-tree/set` | `{ target, enabled }` → 调 `pluginManager.setBundleEnabled`，回带刷新后的 status |
+| `GET /dsh-shared-tree/lifecycle` | 生命周期状态（只读展示：是否初始化、基线 profile 数、台账变更数） |
+| `POST /dsh-shared-tree/panel` | `{ target, exposed, profile? }` → 登记/撤销 `link:` 依赖，让包重新出现在官方 Plugins 面板（不加载） |
 
 一致性是**结构保证**的，不靠约定：
 
 - `/status` 与工具的 `status` 用同一组函数（`scanTree` / `withProfileState` / `junctionFacts` / `readTreeManifest` / `standaloneConflictOf`）。
-- `/verify` 与工具的 `verify` 共用 `computeVerify(root)`；工具只是把它的 `rows` 拼成文本。
-  测试里有一条专门断言「路由 rows 的每一行都出现在工具文本里」。
-- `/set` 调的 `manager.setBundleEnabled` 就是工具 `enable`/`disable` 调的那个方法。
+- `/panel` 与工具的 `panel` 共用 `setPanelVisibility` / `panelReport`。
 
 界面内的搜索与过滤是**纯浏览器侧**数组过滤，不发任何写请求。
-唯一的写请求是 `/set`；**装包不在界面里做**（`install` 仍只走工具或 CLI）。
+客户端唯一的写请求是 `/panel`（点独立 bundle 行跳转前登记面板可见性）；
+**启用/停用、装包、升级、功能行开关都不在界面里做**（归官方 Plugins 页与 `shared_tree` 工具 / 其余 HTTP 路由）。
+
+### 点行行为与已删除的界面能力（2026-11-27 精简）
+
+| 行类型 | 点击行为 |
+|---|---|
+| 独立 bundle | `ensurePanelVisible()`（必要时 `POST /panel` 登记）→ `pluginNavigation.openBundle(name)` 跳官方配置页；失败给 notice |
+| 组件（entry id 归属树内另一个 bundle） | 不跳转，提示去归属插件的设置页切换 |
+| 仅 client 包 | 不跳转，提示没有 bundle 配置页、去官方 Plugins 页管理 |
+
+已删除：行内「启用/关闭」「详情」「功能」「升级」按钮、行内功能行展开、自建详情页
+（描述/功能开关/依赖检查/版本回滚/逐 profile 灰度/功能项覆盖/调试）、详情页「配置页」与
+「加入插件面板」按钮、升级确认弹窗与任务进度卡、「校验」按钮、生命周期「恢复到基线」按钮。
+**服务端路由与工具 action 全部保留**（`/set`、`/rows`、`/set-row`、`/detail`、`/install`、
+`/rollback`、`/verify`、`/lifecycle-baseline-restore` 等仍可经工具或 HTTP 使用），只是客户端不再调用。
 
 ### 容错
 
@@ -178,14 +191,14 @@ shared_tree action=verify    # 逐包复核 sha256，报告版本漂移/内容�
 2. **没有 lockfile 守护**。这份目录没有 `package.json`/`pnpm-lock.yaml`，pnpm 不会替你校验完整性。改动只能靠 `.dsh-shared-tree.json` 的 sha256 复核。
 3. **升级即全局生效**。树里的包被所有 profile 共用，升级会同时影响全部引用者，改前先备份并逐 profile 实跑。
 4. **`@deepseek-ai/*` 只读**。本插件拒绝向该 scope 写入。
-5. **界面不装包**。`install` 只走 `shared_tree` 工具或 CLI；界面里唯一的写操作是启用开关。
-6. **启用态以 Host 为准，界面不缓存**。`restart-required` 的包在 `listBundles()` 里仍是旧状态，
-   界面用行内的「已启用，待重启」标记区分，避免误显示成"未启用"；刷新页面后待重启标记会消失
-   （状态仍以重启后的 Host 为准）。
+5. **界面不做写操作（除面板登记）**。`install` / `enable` / `disable` / `verify` / 升级回滚只走
+   `shared_tree` 工具、CLI 或官方 Plugins 页；客户端唯一的写请求是 `/panel`（登记面板可见性）。
+6. **启用态以 Host 为准，界面不缓存**。界面每次刷新都重拉 `/status`；`restart-required` 的包
+   在 `listBundles()` 里仍是旧状态，需要重启后才会在界面与官方面板里更新。
 7. **界面渲染未做浏览器实测**。契约层（槽位注册、inject 行为、locale、只读、配色）已用测试钉住，
    真实观感（深浅色、约 300px 窄栏下的密度与换行）需要在 App 里肉眼看。
 8. **4 个 `dsh-mnemon-source-*` 仍是独立行**。它们只有 `dsh.client`、不带 `dsh.bundle`，
-   所以既撞不上 entry id、也无法独立启用（没有开关）。当前列表因此是
+   所以既撞不上 entry id、也无法独立启用（点击只给提示，不跳转）。当前列表因此是
    **16 行 = 20 个插件 − 4 个归组组件**。如果希望把它们也收进 dsh-mnemon（列表变 12 行），
    改 `standaloneConflictOf` 的触发条件让它也覆盖 client-only 的 mnemon 组件即可。
 9. **工具侧不过滤**。`shared_tree action=search` 仍能看到全部 194 个包（它带显式 `kind` 过滤，

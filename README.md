@@ -12,7 +12,7 @@
 
 ## App 界面
 
-浏览器侧提供三处入口，都指向同一个面板（插件列表 + 搜索 + 过滤 + 逐个开关）：
+浏览器侧提供三处入口，都指向同一个**只读目录面板**（插件列表 + 搜索 + 过滤 + 刷新）：
 
 1. **左侧边栏图标** → 点开后在**主列**展开完整列表（`main` 面板）。
 2. **右侧边栏 tab**（原生右栏，`sidebarRightTabs` + `sidebar.right.pane.tab`）。
@@ -26,10 +26,24 @@
 组件子行没有独立开关（它们的 entry id 已由归属包提供，单独启用会重复插入 id 触发 issue #470），
 开关由归属包状态 + profile patch 行控制。
 
-**点行直达官方配置页**：有 `dsh.bundle` 且不是「组件」的包，点行直接跳官方 Plugins 页里该插件
-自己的配置面板（宿主 `pluginNavigation.openBundle`）；面板列不出它时先自动把它登记成当前
-profile 的 `link:` 依赖（见下），再跳转。跳转失败（宿主没这个服务 / 登记被拒）或点的是组件时，
-回退到本插件的自建详情页。详情页头部另有「配置页」与「加入插件面板」两个按钮。
+### 点行行为（2026-11-27 精简后）
+
+面板是共享树的**只读目录 + 跳转入口**，不再自建任何详情页，也不提供功能按钮：
+
+| 行类型 | 点击行为 |
+|---|---|
+| 独立 bundle（有 `dsh.bundle`、entry id 不归属别的包） | 先 `ensurePanelVisible()`（面板列不出就登记 `link:` 依赖），再跳官方 Plugins 页里该插件自己的配置面板（宿主 `pluginNavigation.openBundle`）；跳转失败给提示 |
+| 组件（entry id 已由树内另一个 bundle 提供） | **不跳转**，提示「请在归属插件的设置页里切换」 |
+| 仅 client 包（只有 `dsh.client`） | **不跳转**，提示「没有 bundle 配置页，请到官方 Plugins 页管理」 |
+
+启用/停用、升级、回滚、功能行开关、描述文档一律在**官方 Plugins 页**（或 `shared_tree` 工具）里做。
+整个面板只有一个按钮：**刷新**。
+
+已删除的界面能力（服务端路由与工具 action 保持不变，仍可经工具/HTTP 使用）：
+行内「启用/关闭」「详情」「功能」「升级」按钮、行内功能行展开开关、自建详情页
+（描述文档 / 功能开关 / 依赖检查 / 版本回滚 / 逐 profile 灰度 / 功能项覆盖 / 调试 七个区块）、
+详情页「配置页」「加入插件面板」按钮、升级确认弹窗与任务进度卡、「校验」按钮、
+生命周期「恢复到基线」按钮（状态条保留为只读）。
 
 ## 官方面板可见性（panel）
 
@@ -51,7 +65,7 @@ profile 的 `link:` 依赖（见下），再跳转。跳转失败（宿主没这
 入口：
 - 工具：`shared_tree action=panel`（无 target=只读报告；`target=a,b expose=true|false` 执行登记/撤销）。
 - HTTP：`GET/POST /dsh-shared-tree/panel`。
-- 界面：点行跳转时自动执行；详情页「加入插件面板」按钮手动执行；`disable` 停用后自动补登记。
+- 界面：点独立 bundle 行跳转时自动执行（这是客户端唯一的写请求）；`disable` 停用后服务端自动补登记。
 - 需重启 DSH（或该 profile）后官方面板才会重新拉取清单。
 
 面板底部还有一个**只读分区**，列出本 profile 以 `link:` 本地路径安装的插件
@@ -59,9 +73,9 @@ profile 的 `link:` 依赖（见下），再跳转。跳转失败（宿主没这
 分区内没有按钮，也**不计入** `total / plugins / components / libraries` 任何计数
 （只多一个 `counts.linked`）；这些包物理上不在共享树里，启停请用 Plugins 页。
 
-界面数据来自 Host 的只读路由 `/dsh-shared-tree/status`、`/dsh-shared-tree/verify`，
-开关走 `POST /dsh-shared-tree/set` —— 与 `shared_tree` 工具调用**同一个** `pluginManager.setBundleEnabled`，
-所以界面状态与 `status` / `verify` 结论不会分叉。搜索与过滤全在浏览器内完成，不发写请求。
+界面数据来自 Host 的只读路由 `/dsh-shared-tree/status`、`/dsh-shared-tree/lifecycle`，
+唯一的写请求是 `POST /dsh-shared-tree/panel`（跳转前登记面板可见性）。
+搜索与过滤全在浏览器内完成，不发写请求。启用/停用等写操作归官方 Plugins 页与 `shared_tree` 工具。
 
 三处注册各自 try/catch：任何一处失败（例如宿主没有 `sidebarRightTabs`）只少一个入口，
 不影响其他入口，也不影响工具本身。
@@ -90,7 +104,8 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 - **组合包整族进** —— `dsh-mnemon` 需要 18 个子包 + `zod`/`yaml`/`fflate`，install 算的是依赖闭包。
 - **零 `@deepseek-ai` 依赖** —— Host 与客户端两侧都只用 Node 内置模块 / `react`。
   客户端尤其不 require `@deepseek-ai/dsh-client-*`：那些包会在版本间变化，且抛错的组件会让槽位直接空白。
-- **界面只读** —— 唯一的写请求是 `/dsh-shared-tree/set`（启用开关）；装包不在界面里做。
+- **界面只读** —— 客户端唯一的写请求是 `/dsh-shared-tree/panel`（登记面板可见性，不加载插件）；
+  启用/停用、装包、升级都不在界面里做，归官方 Plugins 页与工具。
 
 完整说明与已知限制见 [docs/DETAIL.md](docs/DETAIL.md)。
 
@@ -100,9 +115,12 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 npm test
 ```
 
-- `test/shared-tree.test.mjs` —— Host 侧 33 项（工具 6 个 action + HTTP 通道 + `application` 语义 + `safetyNote` + 只读保证）。
-- `test/client.test.mjs` —— 客户端契约 22 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
-  并发/竞态保护、类别过滤与工具同源、未知状态、可访问性、无硬编码配色）。
+- `test/shared-tree.test.mjs` —— Host 侧 71 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
+  `safetyNote` + 只读保证 + 面板可见性登记/撤销/组件拒登记/生命周期联动）。
+- `test/client.test.mjs` —— 客户端契约 28 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
+  竞态保护、类别过滤与工具同源、未知状态、可访问性、无硬编码配色、
+  **精简契约：功能按钮与自建详情页不得复活、写请求白名单只剩 /panel**）。
+- `test/lifecycle.test.mjs` —— 生命周期 13 项。
 
 渲染后的视觉表现需要有浏览器才能确认；无浏览器控制时只能验证到契约层。
 但「客户端半边是否被组合进页面、服务端发出的 bundle 是否确为本插件代码」可以实测：
