@@ -266,7 +266,7 @@ await test('slots 注册抛错时不连累其他入口', () => {
 await test('写请求白名单：/set、/install、/rollback、/check-profiles、/set-profile', () => {
   const calls = [...SOURCE.matchAll(/postJson\(\s*('([^']+)'|`([^`]+)`)/g)].map((m) => m[2] ?? m[3])
   assert.ok(calls.length > 0, '客户端必须显式声明写请求路径')
-  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry'])
+  const allowed = new Set(['/set', '/install', '/rollback', '/check-profiles', '/set-profile', '/set-entry', '/set-row'])
   for (const path of calls) {
     assert.ok(allowed.has(path), `不允许的写请求：${path}`)
   }
@@ -457,6 +457,22 @@ await test('详情/调试契约：功能项开关、profile 覆盖层、整行�
   // 整行可点：rowMain 的 onClick 直接进详情；行内按钮必须 stopPropagation 防误触。
   assert.ok(/rowMain,\s*cursor:\s*'pointer'/.test(SOURCE), 'rowMain 必须 pointer + 可点')
   assert.ok((SOURCE.match(/event\.stopPropagation\(\)/g) ?? []).length >= 3, '行内按钮都要 stopPropagation')
+})
+
+await test('原版详情复刻契约：描述文档 + 行级功能开关（原版布局与写入链路）', () => {
+  // 描述区：BundleDetailSection 复刻 —— /detail 拉文档 + 极简 Markdown 渲染 + 重试/缺失态。
+  assert.ok(SOURCE.includes('/detail?pkg='), '描述必须走 /detail（宿主 readBundleDetail 同源）')
+  assert.ok(SOURCE.includes('renderMarkdown'), '必须自带 Markdown 渲染（原版 DetailDocument 的降级复刻）')
+  assert.ok(SOURCE.includes('docRetry'), '描述加载失败必须有重试')
+  assert.ok(SOURCE.includes('docMissing'), '无文档时要有缺失文案而不是空白')
+  // 功能开关区：RowsSection 复刻 —— 状态点 + 行 id + 状态 + 拨动开关，写入走原版链路。
+  assert.ok(SOURCE.includes('/rows?pkg='), '功能行必须走 /rows（宿主 listPlugins 同源）')
+  assert.ok(SOURCE.includes('/set-row'), '行开关必须走 /set-row（宿主优先 manager.setPluginEnabled 原版链路）')
+  assert.ok(SOURCE.includes("role: 'switch'"), '开关必须是 role=switch 的拨动控件（原版 Switch 形态）')
+  assert.ok(SOURCE.includes('rowsFilter'), '行多时要有过滤输入框（原版 partsFilter 行为）')
+  assert.ok(SOURCE.includes('readOnlyReason'), '只读行要禁用并给原因（原版 RowSwitch locked 行为）')
+  assert.ok(SOURCE.includes('docSection(),'), '描述区必须在详情页渲染')
+  assert.ok(SOURCE.includes('rowsSection(),'), '功能开关区必须在详情页渲染')
 })
 
 console.log('')

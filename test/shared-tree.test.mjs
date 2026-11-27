@@ -1092,6 +1092,106 @@ await test('GET /debug 汇总加载状态、哈希一致性与引用面', async 
   tree.cleanup()
 })
 
+// ── 原版插件详情复刻：描述 + 行级功能开关 ──────────────────────────────────
+
+await test('GET /detail 优先宿主 readBundleDetail，缺服务时退回包内 README', async () => {
+  const tree = fakeTree()
+  writeFileSync(join(tree.root, 'fake-bundle', 'README.md'), '# fake-bundle\n\n一个假插件。')
+  const { route } = ctxWithRoutes(tree, {
+    listBundles: async () => [],
+    readBundleDetail: async (name, language) => ({
+      status: 'found', path: `docs/${name}.${language}.md`, markdown: `# ${name} (host doc, ${language})`,
+    }),
+  })
+  const host = await callRoute(route.handler, 'GET', `/dsh-shared-tree/detail?pkg=${encodeURIComponent('fake-bundle')}&lang=zh`)
+  assert.equal(host.json.ok, true)
+  assert.equal(host.json.value.source, 'host', '宿主服务可用时必须走 readBundleDetail（原版同源）')
+  assert.match(host.json.value.markdown, /host doc, zh/)
+  tree.cleanup()
+
+  const tree2 = fakeTree()
+  writeFileSync(join(tree2.root, 'fake-bundle', 'README.md'), '# fake-bundle README')
+  const { route: route2 } = ctxWithRoutes(tree2, { listBundles: async () => [] })
+  const readme = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/detail?pkg=${encodeURIComponent('fake-bundle')}&lang=zh`)
+  assert.equal(readme.json.value.source, 'readme', '服务不可用时退回 README 兜底')
+  assert.match(readme.json.value.markdown, /README/)
+  const none = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/detail?pkg=${encodeURIComponent('fake-client')}&lang=zh`)
+  assert.equal(none.json.value.found, false, '没有任何文档时 found=false（界面显示缺失文案）')
+  const bad = await callRoute(route2.handler, 'GET', '/dsh-shared-tree/detail?pkg=')
+  assert.equal(bad.status, 400)
+  tree2.cleanup()
+})
+
+await test('GET /rows 走宿主 listPlugins 按 moduleName 过滤；缺服务时回退补丁解析（只读）', async () => {
+  const tree = fakeTree()
+  writeFileSync(join(tree.root, 'fake-bundle', 'cordis.patch.yml'), '- insert:\n    - id: fake-main\n    - id: fake-widget\n')
+  const { route } = ctxWithRoutes(tree, {
+    listBundles: async () => [],
+    listPlugins: async () => ([
+      { entryId: 'fake-main', rowId: 'fake-main', moduleName: 'fake-bundle', enabled: true, phase: null, readOnlyReason: null },
+      { entryId: 'fake-widget', rowId: 'fake-widget', moduleName: 'fake-bundle', enabled: false, phase: 'failed', readOnlyReason: 'protected' },
+      { entryId: 'other', moduleName: 'some-other-pkg', enabled: true, phase: null, readOnlyReason: null },
+    ]),
+  })
+  const host = await callRoute(route.handler, 'GET', `/dsh-shared-tree/rows?pkg=${encodeURIComponent('fake-bundle')}`)
+  assert.equal(host.json.ok, true)
+  assert.equal(host.json.value.source, 'host')
+  assert.equal(host.json.value.manageable, true)
+  assert.deepEqual(host.json.value.rows.map((row) => row.entryId), ['fake-main', 'fake-widget'], '必须按 moduleName 归属过滤')
+  const widget = host.json.value.rows[1]
+  assert.equal(widget.enabled, false)
+  assert.equal(widget.phase, 'failed')
+  assert.equal(widget.readOnlyReason, 'protected')
+  tree.cleanup()
+
+  const tree2 = fakeTree()
+  writeFileSync(join(tree2.root, 'fake-bundle', 'cordis.patch.yml'), '- insert:\n    - id: fake-main\n')
+  const { route: route2 } = ctxWithRoutes(tree2, { listBundles: async () => [] })
+  const fallback = await callRoute(route2.handler, 'GET', `/dsh-shared-tree/rows?pkg=${encodeURIComponent('fake-bundle')}`)
+  assert.equal(fallback.json.value.source, 'patch')
+  assert.equal(fallback.json.value.manageable, false, '兜底行必须标记只读')
+  assert.match(fallback.json.value.rows[0].readOnlyReason, /不可用|只读|read/)
+  tree2.cleanup()
+})
+
+await test('POST /set-row 优先 manager.setPluginEnabled（原版写入链路），缺服务走覆盖层兜底', async () => {
+  const tree = fakeTree()
+  const calls = []
+  const { route } = ctxWithRoutes(tree, {
+    listBundles: async () => [],
+    setPluginEnabled: async (entryId, enabled) => {
+      if (entryId === 'x') throw new Error('unknown-plugin')
+      calls.push([entryId, enabled])
+      return { application: 'restart-required', nextStep: 'restart DSH' }
+    },
+  })
+  const applied = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-row', { entryId: 'fake-main', enabled: false })
+  assert.equal(applied.json.ok, true)
+  assert.deepEqual(calls, [['fake-main', false]], '必须走原版同一条写入链路')
+  assert.equal(applied.json.value.application, 'restart-required')
+  assert.equal(applied.json.value.restartRequired, true)
+  assert.match(applied.json.value.nextStep, /restart/)
+  const failed = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-row', { entryId: 'x', enabled: true })
+  assert.equal(failed.json.ok, false, 'manager 报错时 ok=false（界面即时反馈失败）')
+  const bad = await callRoute(route.handler, 'POST', '/dsh-shared-tree/set-row', { entryId: 'x' })
+  assert.equal(bad.status, 400)
+  tree.cleanup()
+
+  const tree2 = fakeTree()
+  const dir = join(dirname(tree2.root), 'prof-a')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'prof-a' }, null, 2))
+  const { route: route2 } = ctxWithRoutes(tree2, { listBundles: async () => [] })
+  const noManager = await callRoute(route2.handler, 'POST', '/dsh-shared-tree/set-row', { entryId: 'fake-main', enabled: false })
+  assert.equal(noManager.status, 503, '无服务且未给 profile 时 503')
+  const fallback = await callRoute(route2.handler, 'POST', '/dsh-shared-tree/set-row', { entryId: 'fake-main', enabled: false, profile: 'prof-a' })
+  assert.equal(fallback.json.ok, true)
+  assert.equal(fallback.json.value.application, 'restart-required', '兜底路径必须标记需重启')
+  const text = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+  assert.match(text, /- id: fake-main/, '兜底必须把禁用写进 profile 覆盖层')
+  tree2.cleanup()
+})
+
 console.log('')
 console.log(`${passed} 通过，${failed} 失败`)
 if (failed > 0) process.exitCode = 1
