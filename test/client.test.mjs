@@ -329,6 +329,13 @@ await test('升级能力契约：可升级判据、确认弹窗、进度轮询�
   assert.ok(/setUpdates\(\{\}\)/.test(SOURCE), '升级完成后必须清掉旧的可升级缓存')
   // 行内升级按钮必须 stopPropagation，避免误触发行点击跳转。
   assert.ok(/event\.stopPropagation\(\); void openConfirm/.test(SOURCE), '升级按钮必须 stopPropagation')
+  // 检查更新必须并发 + 增量上屏（单次 /deps 实测 3-7s，串行 20 个包要 90s+，用户会以为按钮坏了）。
+  const checkBody = SOURCE.slice(SOURCE.indexOf('const checkUpdates = useCallback'), SOURCE.indexOf('}, [data])', SOURCE.indexOf('const checkUpdates = useCallback')))
+  assert.ok(/Promise\.all/.test(checkBody), '检查更新必须并发（不能逐个串行 await）')
+  assert.ok(/CONCURRENCY/.test(checkBody), '必须有并发上限（registry 不宜打爆）')
+  assert.ok(/setCheckProgress/.test(checkBody), '必须回报进度，避免长时间只有一个"检查中"')
+  assert.ok(/setUpdates\(\{ \.\.\.next \}\)/.test(checkBody), '必须增量上屏（探到一个显示一个）')
+  assert.ok(SOURCE.includes('checkingProgress'), '按钮/提示要有 {done}/{total} 进度文案')
 })
 
 await test('样式只用主题 token 或透明值，没有硬编码配色（图标除外）', () => {

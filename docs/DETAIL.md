@@ -159,7 +159,7 @@ shared_tree action=disable target=dsh-taskboard
 | 环节 | 实现 | 与删除前的关系 |
 |---|---|---|
 | 可升级判据 | `GET /deps?pkg=<名>&ver=latest`：`available===true` 且 `version !== 树内版本` | 同源（原 DetailPanel 的 upToDate 判据） |
-| 检查入口 | 顶部「检查更新」按钮 + 挂载后自动检查一次；顶部汇总「N 个插件有新版本」 | 新增（原为逐包进详情页查看） |
+| 检查入口 | 顶部「检查更新」按钮 + 挂载后自动检查一次；4 路并发 + 增量上屏 + `done/total` 进度；汇总「N 个插件有新版本」 | 新增（原为逐包进详情页查看） |
 | 升级入口 | 行内「升级」按钮（仅检查出有新版本时出现）+ 版本旁 `→ v新版本` | 同源（原行内按钮） |
 | 确认弹窗 | `ConfirmModal`：精确版本锁定 + 影响面（`/impact`）+ 依赖检查（`ok===false` 置灰） | 同源，依赖检查从原 depsSection 移入 |
 | 执行通道 | `POST /install`（`replace:true`）→ `JobCard` 四阶段进度（800ms 轮询 `/install/progress`） | 同源 |
@@ -167,6 +167,21 @@ shared_tree action=disable target=dsh-taskboard
 
 升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做；
 行点击仍 `ensurePanelVisible()` → `openBundle()`，组件/client-only 仍只给 notice。
+
+#### 2026-11-27 修复的两个阻断缺陷（"界面上看不到升级按钮"的真因）
+
+1. **`pnpmView` 的 JSON 切片错**：旧实现用 `lastIndexOf('{')` 取 JSON 主体，而
+   `pnpm view <pkg> --json` 的对象体里嵌套 `versions`（对象）、`time`（对象）、`dist` 等，
+   最后一个 `{` 落在对象**内部**，切出的片段不是合法 JSON → 每个包都 `PARSE_FAIL` →
+   `/deps` 全部返回 `available:false`「无法从 registry 读取最新版本」→ `upgradeInfo` 恒为 null
+   → 界面上**一个升级按钮都没有**。改为 `sliceJsonBody()`：从第一个 `{`/`[` 起按括号平衡
+   （跳过字符串与转义）切到真实闭合位置。
+2. **依赖检查误判**：
+   - `satisfiesRange` 不支持 `||`，`engines.node: "^22.19 || >=24"` 在本机 24.21.0 上被判不满足；
+   - 宿主自带 peer（`react` / `react-dom` / `@deepseek-ai/*`）打进 `app.asar`，磁盘查不到，
+     旧实现一律 `ok=false`，使几乎所有插件 `deps.ok=false`，确认弹窗「开始升级」被置灰。
+   修正：支持 `||` 并联；新增 `isHostProvidedPeer()`，这类 peer 标 `hostProvided:true / ok:null` 不拦；
+   只有明确 `ok === false`（如缺第三方 `@huanlin/dsh-plugin-better-locale`）才拦。
 
 ### 默认登记进官方面板（2026-11-27）
 

@@ -42,6 +42,8 @@
 
 - **检查更新**：顶部「检查更新」按钮（挂载后自动检查一次），对每个插件包问
   `GET /deps?pkg=<名>&ver=latest`；顶部汇总「N 个插件有新版本」。
+  **并发探测（4 路）+ 增量上屏**，按钮显示「正在检查 done/total…」——
+  单次 `/deps` 实测 3–7 秒（内部两次 `pnpm view`），串行探测 20 个包要 90 秒以上。
 - **可升级判据**（与删除前同源）：`deps.available === true` 且 `deps.version !== 树内版本`。
   registry 不可达的包不显示升级按钮。
 - **行内「升级」按钮**：只在检查出有新版本时出现，版本号旁显示 `→ v新版本`；
@@ -50,6 +52,14 @@
   （prepare/build/merge/verify，800ms 轮询 `/install/progress`）→ 完成后
   `POST /check-profiles` 逐 profile 验证 + 列表刷新到最新版本。
 - 升级不影响默认登记与跳转链路：`link:` 依赖指向树内目录，升级换的是目录内容，登记无需重做。
+
+**依赖检查的两条判据修正**（否则升级按钮会被大面积错误置灰）：
+1. `satisfiesRange` 支持 `||` 并联（如 `engines.node: "^22.19 || >=24"`）；旧实现把整串当不满足，
+   本机 node 24.21.0 也被判不通过。
+2. **宿主自带 peer 不再判"未安装"**：`react` / `react-dom` / `@deepseek-ai/*` 打进 `app.asar`，
+   磁盘上本来就不存在；旧实现一律 `ok=false`，导致几乎每个插件的依赖检查都失败。
+   现在标 `hostProvided: true / ok: null`（不拦），真第三方 peer（如
+   `@huanlin/dsh-plugin-better-locale`）缺失仍会正确拦下。
 
 已删除的界面能力（服务端路由与工具 action 保持不变，仍可经工具/HTTP 使用）：
 行内「启用/关闭」「详情」「功能」按钮、行内功能行展开开关、自建详情页
@@ -140,9 +150,10 @@ shared_tree action=panel target=dsh-douyin,dsh-config-manager
 npm test
 ```
 
-- `test/shared-tree.test.mjs` —— Host 侧 80 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
+- `test/shared-tree.test.mjs` —— Host 侧 82 项（工具 8 个 action + HTTP 通道 + `application` 语义 +
   `safetyNote` + 只读保证 + 面板可见性登记/撤销/组件拒登记/生命周期联动 +
-  **默认登记：启用后自动登记、幂等、不覆盖用户依赖、启动补扫存量、跳过组件、撤销尊重**）。
+  **默认登记：启用后自动登记、幂等、不覆盖用户依赖、启动补扫存量、跳过组件、撤销尊重** +
+  **pnpm 输出解析（嵌套 versions/time 的 JSON 切片）+ 依赖检查（`||` 并联、宿主自带 peer 不误判）**）。
 - `test/client.test.mjs` —— 客户端契约 29 项（模块 id、槽位注册、locale 双语言对齐、inject 行为回归、
   竞态保护、类别过滤与工具同源、未知状态、可访问性、无硬编码配色、
   **精简契约：自建详情页与无关按钮不得复活（升级能力除外）、写请求白名单 /panel+/install+/check-profiles**、

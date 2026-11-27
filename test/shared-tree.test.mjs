@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { apply, inject, name } from '../lib/index.js'
+import { apply, exporter, inject, name } from '../lib/index.js'
 import { readLedger, restoreFromLedger } from '../lib/lifecycle.js'
 
 let passed = 0
@@ -929,6 +929,60 @@ await test('GET /impact 报告引用 profile、解析版本与升级历史', asy
   assert.equal(json.value.profiles.find((item) => item.profile === 'prof-b').referenced, false)
   assert.ok(existsSync(profileDir))
   tree.cleanup()
+})
+
+await test('pnpm 输出解析：嵌套 versions/time 的对象必须切对 JSON 主体（可升级判据的根）', () => {
+  // 实测缺陷：pnpmView 原来用 lastIndexOf('{') 切 JSON，而 `pnpm view --json` 的对象体里
+  // 嵌套着 versions / time / dist，最后一个 `{` 落在 `time` 字段内 → 所有包都解析失败 →
+  // 全部报「registry 不可达」→ 界面上一个升级按钮都不出现。
+  const { sliceJsonBody } = exporter
+  // 真实形状：嵌套对象 + 数组 + 字符串里的花括号。
+  const real = [
+    'some pnpm noise line',
+    '{',
+    '  "_id": "dsh-taskboard@0.10.1",',
+    '  "name": "dsh-taskboard",',
+    '  "version": "0.10.1",',
+    '  "description": "a { brace } inside a string",',
+    '  "dist": { "tarball": "https://example/x.tgz" },',
+    '  "versions": [ "0.1.0", "0.10.0", "0.10.1" ],',
+    '  "time": { "0.10.0": "2026-11-17T11:07:26.325Z", "0.10.1": "2026-11-24T13:02:28.726Z" }',
+    '}',
+  ].join('\n')
+  const body = sliceJsonBody(real)
+  assert.ok(typeof body === 'string', '必须切出 JSON 主体')
+  const parsed = JSON.parse(body)
+  assert.equal(parsed.version, '0.10.1', '必须取到顶层 version')
+  assert.equal(parsed._id, 'dsh-taskboard@0.10.1')
+  // 反证：旧的 lastIndexOf 切法在这样的输入上必然失败。
+  const legacy = real.slice(real.lastIndexOf('{'))
+  assert.throws(() => JSON.parse(legacy), '旧解析法在真实 pnpm 输出上必然失败（这就是本次缺陷）')
+  // 数组根也能切。
+  const arr = sliceJsonBody('noise\n[{"a":1},{"b":2}]\ntrailing')
+  assert.deepEqual(JSON.parse(arr), [{ a: 1 }, { b: 2 }])
+  // 没有 JSON 时返回 undefined（不抛错）。
+  assert.equal(sliceJsonBody('no json here'), undefined)
+})
+
+await test('依赖检查：|| 并联范围与宿主自带 peer 不得误判为不满足', () => {
+  const { satisfiesRange } = exporter
+  // `^22.19 || >=24`：本机 node 24.21.0 应满足（旧实现不支持 || → 误判 false）。
+  assert.equal(satisfiesRange('24.21.0', '^22.19 || >=24'), true)
+  assert.equal(satisfiesRange('20.11.0', '^22.19 || >=24'), false)
+  assert.equal(satisfiesRange('22.19.5', '^22.19 || >=24'), true)
+  // 单分支行为保持。
+  assert.equal(satisfiesRange('24.21.0', '>=20'), true)
+  assert.equal(satisfiesRange('0.2.2-rc.5', '^0.2.2-rc.2'), true)
+  assert.equal(satisfiesRange('4.1.0', '^4.1.0'), true)
+  // 多区间（空格并列，如 ">=3.18.5 <4"）：只按首个算子判定为 true——不会误拦，
+  // 这是有意的宽松（宁可放行让人肉眼核对，也不因为解析不全把升级按钮置灰）。
+  assert.equal(satisfiesRange('3.19.0', '>=3.18.5 <4'), true)
+  // 宿主自带 peer 判定：react / react-dom / @deepseek-ai/* 必须认作宿主提供。
+  const { isHostProvidedPeer } = exporter
+  assert.equal(isHostProvidedPeer('react'), true)
+  assert.equal(isHostProvidedPeer('react-dom'), true)
+  assert.equal(isHostProvidedPeer('@deepseek-ai/dsh-client-ui-slots'), true)
+  assert.equal(isHostProvidedPeer('@huanlin/dsh-plugin-better-locale'), false, '第三方 peer 不算宿主自带')
 })
 
 await test('GET /deps 缺 pkg 或版本非法时返回 400（不触网）', async () => {
