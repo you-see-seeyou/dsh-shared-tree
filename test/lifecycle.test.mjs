@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { destroyTree, ensureTreeDir, lifecycleStatus, listProfileNames, readLedger, recordChange, restoreFromLedger, snapshotBaseline } from '../lib/lifecycle.js'
+import { destroyTree, ensureTreeDir, ledgerCorrupt, lifecycleStatus, listProfileNames, readLedger, recordChange, restoreFromLedger, snapshotBaseline } from '../lib/lifecycle.js'
 
 let passed = 0
 let failed = 0
@@ -181,6 +181,60 @@ await test('还原 profile package.json（bundles 数组回滚）', async () => 
   restoreFromLedger(home.root)
   const restored = JSON.parse(readFileSync(file, 'utf8'))
   assert.deepEqual(restored.dsh.profile.bundles, ['dsh-taskboard'], 'bundles 必须回滚')
+  home.cleanup()
+})
+
+await test('C1 回归：同一文件连续写两次，还原后必须回到最初 before（台账序=新→旧）', async () => {
+  const home = fakeHome()
+  snapshotBaseline(home.root)
+  const patchFile = join(home.base, 'profiles', 'alpha', 'cordis.patch.yml')
+  const original = readFileSync(patchFile, 'utf8')
+  const state1 = `${original}- id: row-1\n  disabled: true\n`
+  writeFileSync(patchFile, state1)
+  recordChange(home.root, { kind: 'patch-file', profile: 'alpha', file: 'cordis.patch.yml', before: original, after: state1 })
+  const state2 = `${state1}- id: row-2\n  disabled: true\n`
+  writeFileSync(patchFile, state2)
+  recordChange(home.root, { kind: 'patch-file', profile: 'alpha', file: 'cordis.patch.yml', before: state1, after: state2 })
+
+  const outcome = restoreFromLedger(home.root)
+  assert.equal(outcome.reverted.length, 2, '两条都必须命中（新→旧逐级回退）')
+  assert.equal(outcome.skipped.length, 0, '不得有「被改过」的误判')
+  assert.equal(readFileSync(patchFile, 'utf8'), original, '必须回退到最初的 before，而不是中间态')
+  assert.equal(readLedger(home.root).changes.length, 0, '成功还原的条目必须从台账摘除（重复 dispose 不重复处理）')
+  home.cleanup()
+})
+
+await test('M1 回归：before/after 超限被截断的条目必须跳过（不得误删文件）', async () => {
+  const home = fakeHome()
+  snapshotBaseline(home.root)
+  const bigFile = join(home.base, 'profiles', 'alpha', 'cordis.patch.yml')
+  const bigText = `# ${'x'.repeat(300 * 1024)}\n`
+  writeFileSync(bigFile, bigText)
+  recordChange(home.root, { kind: 'patch-file', profile: 'alpha', file: 'cordis.patch.yml', before: bigText, after: bigText })
+  const outcome = restoreFromLedger(home.root)
+  assert.equal(outcome.skipped.length, 1, '截断条目必须跳过')
+  assert.ok(existsSync(bigFile), '截断条目不得删文件')
+  assert.equal(readFileSync(bigFile, 'utf8'), bigText, '截断条目内容不得被改')
+  home.cleanup()
+})
+
+await test('M2 回归：台账损坏时 snapshotBaseline 拒绝重建、recordChange 抛错、还原拒绝', async () => {
+  const home = fakeHome()
+  snapshotBaseline(home.root)
+  const ledgerFile = join(home.root, '.dsh-shared-tree-lifecycle.json')
+  const goodLedger = readFileSync(ledgerFile, 'utf8')
+  writeFileSync(ledgerFile, '{corrupted json!!')
+  assert.equal(ledgerCorrupt(home.root), true)
+  const snap = snapshotBaseline(home.root)
+  assert.equal(snap.corrupt, true, '损坏时不得重建快照')
+  assert.equal(snap.created, false)
+  assert.throws(() => recordChange(home.root, { kind: 'patch-file', profile: 'alpha', file: 'x', before: null, after: 'a' }), /台账损坏/)
+  const outcome = restoreFromLedger(home.root)
+  assert.equal(outcome.reverted.length, 0)
+  assert.equal(outcome.skipped.length, 1, '损坏时还原必须拒绝并报告')
+  // 用户修好台账后一切恢复。
+  writeFileSync(ledgerFile, goodLedger)
+  assert.equal(ledgerCorrupt(home.root), false)
   home.cleanup()
 })
 
